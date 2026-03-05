@@ -8,8 +8,12 @@ from typing import Iterator, Optional, Union, List
 
 import requests
 
-from .config import ConfigManager, RpcConfig
-from .logger import get_logger
+try:
+    from .config import ConfigManager, RpcConfig
+    from .logger import get_logger
+except ImportError:
+    from config import ConfigManager, RpcConfig
+    from logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -129,43 +133,42 @@ class RowRecordBinaryExtractor:
     """
 
     @staticmethod
-    def extract_row_binary(row_record) -> Optional[bytes]:
+    def extract_row_binary(row_record) -> Optional[tuple]:
         """
-        Extract binary data from a single RowRecord
+        Extract column values and operation type from a single RowRecord
 
         Args:
             row_record: sink_pb2.RowRecord protobuf message
 
         Returns:
-            Concatenated binary data of row values, or None if empty
+            Tuple of (operation_type, column_values_list), or None if no data
+            column_values_list is a list of bytes, one per column
         """
         # Extract 'after' value if available (new/updated data), else 'before'
         row_value = row_record.after if row_record.after and row_record.after.values else row_record.before
         if not row_value or not row_value.values:
             return None
 
-        # Concatenate all column values as bytes
-        binary_data = b""
-        for col_value in row_value.values:
-            binary_data += col_value.value
+        # Extract each column value as separate bytes
+        column_values = [col_value.value for col_value in row_value.values]
 
-        return binary_data if binary_data else None
+        return (row_record.op, column_values) if column_values else None
 
     @staticmethod
-    def extract_records_binary(row_records: List) -> List[bytes]:
+    def extract_records_binary(row_records: List) -> List[tuple]:
         """
-        Extract binary data from multiple RowRecords
+        Extract column values and operation types from multiple RowRecords
 
         Args:
             row_records: List of sink_pb2.RowRecord messages
 
         Returns:
-            List of binary data, skipping None entries
+            List of (operation_type, column_values_list) tuples, skipping None entries
         """
         result = []
         for record in row_records:
-            binary = RowRecordBinaryExtractor.extract_row_binary(record)
-            if binary is not None:
-                result.append(binary)
+            extracted = RowRecordBinaryExtractor.extract_row_binary(record)
+            if extracted is not None:
+                result.append(extracted)
         return result
         logger.info("RpcFetcher session closed")

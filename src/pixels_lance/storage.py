@@ -9,8 +9,12 @@ import lancedb
 import lance
 import pyarrow as pa
 
-from .config import ConfigManager, LanceDBConfig
-from .logger import get_logger
+try:
+    from .config import ConfigManager, LanceDBConfig
+    from .logger import get_logger
+except ImportError:
+    from config import ConfigManager, LanceDBConfig
+    from logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -164,6 +168,50 @@ class LanceDBStore:
         op = op.when_not_matched_insert_all()
         op.execute(pa_table)
         logger.info("Upsert completed", extra={"table_name": table_name, "records": len(data)})
+
+    def delete(
+        self,
+        data: Union[Dict[str, Any], List[Dict[str, Any]]],
+        table_name: Optional[str] = None,
+        key: Optional[Union[str, List[str]]] = None,
+    ) -> None:
+        """
+        Delete records from LanceDB table.
+
+        Args:
+            data: record or list of records to delete (must contain primary key values)
+            table_name: table name to operate on
+            key: primary key field(s) used for matching
+        """
+        table_name = table_name or self.config.table_name
+        if isinstance(data, dict):
+            data = [data]
+
+        if key is None and hasattr(self, "table") and self.table is not None:
+            try:
+                key = self.table.schema.primary_key
+            except Exception:
+                key = None
+
+        if key is None:
+            raise ValueError("Primary key must be provided for delete")
+
+        # compute dataset path
+        dataset_path = f"{self.config.db_path}/{table_name}.lance"
+        dataset = lance.dataset(dataset_path)
+
+        # Build WHERE clause for primary key matching
+        if isinstance(key, str):
+            # Single primary key
+            pk_values = [record[key] for record in data]
+            where_clause = f"{key} IN ({', '.join(repr(v) for v in pk_values)})"
+        else:
+            # Composite primary key - this is more complex, for now assume single key
+            raise ValueError("Composite primary keys not yet supported for delete")
+
+        # Execute delete
+        dataset.delete(where_clause)
+        logger.info("Delete completed", extra={"table_name": table_name, "records": len(data)})
 
     def query(
         self,

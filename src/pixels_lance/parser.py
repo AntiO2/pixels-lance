@@ -13,7 +13,10 @@ from io import BytesIO
 
 import yaml
 
-from .logger import get_logger
+try:
+    from .logger import get_logger
+except ImportError:
+    from logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -65,71 +68,6 @@ class DataType(Enum):
 class SchemaField:
     """Represents a field in the binary data schema with enhanced type support"""
 
-
-def _convert_hybench_table(table: dict) -> dict:
-    """Helper converting hybench style table dict to our schema dict
-
-    The hybench format from `schema_hybench.yaml` uses fields as a key->type
-    mapping and includes `pk`.  We transform it to the flat list expected by
-    ``Schema.from_dict`` with type translation.
-    """
-    def map_type(sql_type: str) -> str:
-        # basic mapping from SQL style to parser types
-        t = sql_type.lower()
-        if t.startswith("varchar"):
-            return "varchar"
-        if t.startswith("char"):
-            return "char"
-        if t == "int":
-            return "int32"
-        if t == "bigint":
-            return "int64"
-        if t == "real":
-            return "float32"
-        if t == "timestamp":
-            return "timestamp"
-        if t == "date":
-            return "date"
-        if t == "int8" or t == "tinyint":
-            return "int8"
-        if t == "int16" or t == "smallint":
-            return "int16"
-        if t == "boolean" or t == "bool":
-            return "boolean"
-        # fallback: return raw
-        return t
-
-    fields = []
-    offset = 0
-    for name, sql_type in table.get("fields", {}).items():
-        dtype = map_type(sql_type)
-        size = None
-        # extract size if varchar or char
-        if dtype in ("varchar", "char"):
-            # find number inside parentheses
-            import re
-            m = re.search(r"\((\d+)\)", sql_type)
-            if m:
-                size = int(m.group(1))
-        # simple sizing for fixed types
-        schema_field = {
-            "name": name,
-            "type": dtype,
-            "size": size,
-            "offset": offset,
-            "nullable": True,
-        }
-        # advance offset with approximate size
-        if size is not None:
-            offset += size
-        else:
-            # default sizes
-            default_sizes = {"int32": 4, "int64": 8, "float32": 4, "date": 4, "timestamp": 8}
-            offset += default_sizes.get(dtype, 0)
-        fields.append(schema_field)
-    return {"table_name": table.get("name"), "fields": fields, "pk": table.get("pk", [])}
-
-
     def __init__(
         self,
         name: str,
@@ -180,11 +118,12 @@ def _convert_hybench_table(table: dict) -> dict:
             "int64": 8,
             "uint64": 8,
             "float64": 8,
-            "date": 4,  # Days since epoch (int32)
-            "time": 4,  # Milliseconds in a day (int32)
-            "timestamp": 8,  # Epoch milliseconds (int64)
+            "date": 4,
+            "time": 4,
+            "timestamp": 8,
+            "timestamp_with_tz": 8,
+            "boolean": 1,
         }
-
         return type_sizes.get(self.type, 0)
 
 
@@ -247,25 +186,14 @@ class Schema:
         if isinstance(data, dict) and "fields" in data:
             return cls.from_dict(data)
 
-        # multiple schemas
+        # multiple schemas (standard format: list or dict with "schemas" key)
         items = None
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict) and "schemas" in data:
             items = data["schemas"]
-        # hybench style uses 'tables' as the key for multiple definitions
-        elif isinstance(data, dict) and "tables" in data:
-            items = data["tables"]
 
         if items is not None:
-            # detect hybench style (each item has name, pk, fields mapping)
-            hybench = False
-            for item in items:
-                if "fields" in item and isinstance(item["fields"], dict):
-                    hybench = True
-                    break
-            if hybench:
-                return SchemaCollection.from_list([_convert_hybench_table(i) for i in items])
             return SchemaCollection.from_list(items)
 
         # fallback: try to interpret as single schema
@@ -341,105 +269,115 @@ class DataParser:
 
         logger.info("DataParser initialized", extra={"field_count": len(self.schema.fields)})
 
-    def parse(self, data: bytes) -> Dict[str, Any]:
+    def parse(self, column_values: List[bytes]) -> Dict[str, Any]:
         """
-        Parse binary data according to schema
+        Parse column values according to schema
 
         Args:
-            data: Binary data to parse
+            column_values: List of binary data, one per column (in schema field order)
 
         Returns:
             Dictionary with field names as keys and parsed values
         """
         result = {}
 
-        for field in self.schema.fields:
+        if len(column_values) != len(self.schema.fields):
+            logger.error(
+                "Column count mismatch",
+                extra={
+                    "expected": len(self.schema.fields),
+                    "received": len(column_values),
+                },
+            )
+            
+        for i, field in enumerate(self.schema.fields):
             try:
-                value = self._parse_field(data, field)
-                result[field.name] = value
+                if i < len(column_values):
+                    value = self._parse_field_value(column_values[i], field)
+                    result[field.name] = value
+                else:
+                    result[field.name] = None if field.nullable else field.name + "_MISSING"
             except Exception as e:
                 logger.error(
                     "Failed to parse field",
-                    extra={"field": field.name, "type": field.type, "error": str(e)},
+                    extra={
+                        "field": field.name,
+                        "type": field.type,
+                        "column_index": i,
+                        "data_len": len(column_values[i]) if i < len(column_values) else 0,
+                        "error": str(e)
+                    },
                 )
                 result[field.name] = None if field.nullable else field.name + "_ERROR"
 
         return result
 
-    def _parse_field(self, data: bytes, field: SchemaField) -> Any:
-        """Parse a single field from binary data with type-aware conversion"""
-        offset = field.offset
-        
-        # Check bounds
-        if offset < 0 or offset >= len(data):
-            if field.nullable:
-                return None
-            raise ValueError(f"Offset {offset} out of bounds for field {field.name}")
-
+    def _parse_field_value(self, data: bytes, field: SchemaField) -> Any:
+        """Parse a single field's binary value (no offset needed, data is the complete field value)"""
         field_type = field.type.lower()
 
         # Handle integer types
         if field_type in ("int8", "byte"):
-            return self._parse_int(data, offset, 1, signed=True)
+            return self._parse_int(data, 0, 1, signed=True)
         elif field_type == "uint8":
-            return self._parse_int(data, offset, 1, signed=False)
+            return self._parse_int(data, 0, 1, signed=False)
         elif field_type == "int16":
-            return self._parse_int(data, offset, 2, signed=True)
+            return self._parse_int(data, 0, 2, signed=True)
         elif field_type == "uint16":
-            return self._parse_int(data, offset, 2, signed=False)
+            return self._parse_int(data, 0, 2, signed=False)
         elif field_type in ("int32", "int"):
-            return self._parse_int(data, offset, 4, signed=True)
+            return self._parse_int(data, 0, 4, signed=True)
         elif field_type == "uint32":
-            return self._parse_int(data, offset, 4, signed=False)
+            return self._parse_int(data, 0, 4, signed=False)
         elif field_type in ("int64", "bigint", "long"):
-            return self._parse_int(data, offset, 8, signed=True)
+            return self._parse_int(data, 0, 8, signed=True)
         elif field_type == "uint64":
-            return self._parse_int(data, offset, 8, signed=False)
+            return self._parse_int(data, 0, 8, signed=False)
 
         # Handle floating point types
         elif field_type in ("float32", "float"):
-            return self._parse_float(data, offset, 4)
+            return self._parse_float(data, 0, 4)
         elif field_type in ("float64", "double"):
-            return self._parse_float(data, offset, 8)
+            return self._parse_float(data, 0, 8)
 
         # Handle string types
         elif field_type in ("varchar", "char", "string"):
-            return self._parse_string(data, offset, field.size, field.charset)
+            return self._parse_string(data, 0, field.size, field.charset)
 
         # Handle binary types
         elif field_type in ("bytes", "binary", "varbinary"):
-            return self._parse_bytes(data, offset, field.size)
+            return self._parse_bytes(data, 0, field.size)
 
         # Handle date/time types
         elif field_type == "date":
-            return self._parse_date(data, offset)
+            return self._parse_date(data, 0)
         elif field_type == "time":
-            return self._parse_time(data, offset)
+            return self._parse_time(data, 0)
         elif field_type in ("timestamp", "timestamp_with_tz"):
-            return self._parse_timestamp(data, offset, field.precision or 3)
+            return self._parse_timestamp(data, 0, field.precision or 3)
 
         # Handle decimal type
         elif field_type == "decimal":
-            return self._parse_decimal(data, offset, field.size, field.precision, field.scale)
+            return self._parse_decimal(data, 0, field.size, field.precision, field.scale)
 
         # Handle boolean
         elif field_type == "boolean":
-            return self._parse_boolean(data, offset)
+            return self._parse_boolean(data, 0)
 
         else:
             raise ValueError(f"Unsupported type: {field_type}")
 
     def _parse_int(self, data: bytes, offset: int, size: int, signed: bool = True) -> Optional[int]:
-        """Parse integer from binary data"""
+        """Parse integer from binary data (Big-Endian)"""
         if offset + size > len(data):
             return None
         
         field_data = data[offset:offset + size]
         
         if signed:
-            fmt = {1: 'b', 2: '<h', 4: '<i', 8: '<q'}.get(size)
+            fmt = {1: 'b', 2: '>h', 4: '>i', 8: '>q'}.get(size)  # Big-Endian
         else:
-            fmt = {1: 'B', 2: '<H', 4: '<I', 8: '<Q'}.get(size)
+            fmt = {1: 'B', 2: '>H', 4: '>I', 8: '>Q'}.get(size)  # Big-Endian
         
         if fmt is None:
             raise ValueError(f"Unsupported integer size: {size}")
@@ -496,21 +434,21 @@ class DataParser:
         return field_data.hex()
 
     def _parse_date(self, data: bytes, offset: int) -> Optional[date]:
-        """Parse date (days since epoch as int32)"""
+        """Parse date (days since epoch as int32, Big-Endian)"""
         if offset + 4 > len(data):
             return None
         
-        days = struct.unpack('<i', data[offset:offset + 4])[0]
+        days = struct.unpack('>i', data[offset:offset + 4])[0]  # Big-Endian
         # Convert days since epoch (1970-01-01)
         epoch = datetime(1970, 1, 1).date()
         return epoch + __import__('datetime').timedelta(days=days)
 
     def _parse_time(self, data: bytes, offset: int) -> Optional[time]:
-        """Parse time (milliseconds in a day as int32)"""
+        """Parse time (milliseconds in a day as int32, Big-Endian)"""
         if offset + 4 > len(data):
             return None
         
-        millis = struct.unpack('<i', data[offset:offset + 4])[0]
+        millis = struct.unpack('>i', data[offset:offset + 4])[0]  # Big-Endian
         total_seconds = millis // 1000
         microseconds = (millis % 1000) * 1000
         
@@ -521,20 +459,25 @@ class DataParser:
         return time(hour=hours, minute=minutes, second=seconds, microsecond=microseconds)
 
     def _parse_timestamp(self, data: bytes, offset: int, precision: int) -> Optional[datetime]:
-        """Parse timestamp (epoch milliseconds as int64)"""
+        """Parse timestamp (epoch microseconds as int64, Big-Endian)"""
         if offset + 8 > len(data):
+            logger.warning(
+                "Timestamp data too short",
+                extra={"expected": 8, "actual": len(data) - offset, "data_hex": data.hex()}
+            )
             return None
         
-        millis = struct.unpack('<q', data[offset:offset + 8])[0]
+        value = struct.unpack('>q', data[offset:offset + 8])[0]  # Big-Endian
         
-        # Convert based on precision
-        # precision 3 = milliseconds, 6 = microseconds, etc.
-        if precision <= 3:
-            return datetime.fromtimestamp(millis / 1000)
-        else:
-            microseconds = millis % 1000000
-            seconds = millis // 1000000
-            return datetime.fromtimestamp(seconds + microseconds / 1000000)
+        # The value is in microseconds (not milliseconds)
+        try:
+            return datetime.fromtimestamp(value / 1000000.0)
+        except (ValueError, OSError) as e:
+            logger.error(
+                "Failed to parse timestamp",
+                extra={"value": value, "error": str(e)}
+            )
+            return None
 
     def _parse_decimal(self, data: bytes, offset: int, size: Optional[int], 
                       precision: Optional[int], scale: Optional[int]) -> Optional[Decimal]:
@@ -573,14 +516,14 @@ class DataParser:
         
         return False
 
-    def parse_batch(self, data_list: List[bytes]) -> List[Dict[str, Any]]:
+    def parse_batch(self, data_list: List[List[bytes]]) -> List[Dict[str, Any]]:
         """
-        Parse multiple binary data items
+        Parse multiple records (each record is a list of column values)
 
         Args:
-            data_list: List of binary data
+            data_list: List of records, where each record is a list of column binary values
 
         Returns:
             List of parsed dictionaries
         """
-        return [self.parse(data) for data in data_list]
+        return [self.parse(column_values) for column_values in data_list]

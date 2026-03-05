@@ -3,15 +3,15 @@
 
 rpc:
   # RPC endpoint URL (for HTTP-JSON, can use environment variable)
-  url: ${RPC_URL:-http://localhost:8545}
+  url: localhost:9091
   # Request timeout in seconds
   timeout: 30
   # Maximum retry attempts
   max_retries: 3
   # gRPC configuration (default enabled for PixelsPollingService)
   use_grpc: true
-  grpc_host: ${GRPC_HOST:-localhost}
-  grpc_port: 6688
+  grpc_host: localhost
+  grpc_port: 9091
 
 lancedb:
   # Path to LanceDB database directory
