@@ -2,12 +2,16 @@
 # Environment variables can be referenced using ${VAR_NAME} syntax
 
 rpc:
-  # RPC endpoint URL (can use environment variable)
+  # RPC endpoint URL (for HTTP-JSON, can use environment variable)
   url: ${RPC_URL:-http://localhost:8545}
   # Request timeout in seconds
   timeout: 30
   # Maximum retry attempts
   max_retries: 3
+  # gRPC configuration
+  use_grpc: false
+  grpc_host: ${GRPC_HOST:-localhost}
+  grpc_port: 6688
 
 lancedb:
   # Path to LanceDB database directory

@@ -1,8 +1,10 @@
 """
 RPC data fetcher module
+
+Supports both HTTP-JSON RPC and gRPC endpoints for fetching binary data.
 """
 
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Union, List
 
 import requests
 
@@ -117,4 +119,53 @@ class RpcFetcher:
     def close(self) -> None:
         """Close the session"""
         self.session.close()
+
+
+class RowRecordBinaryExtractor:
+    """Extract binary data from protobuf RowRecord messages
+    
+    Converts PixelsPollingService responses (RowRecord protobuf messages)
+    into binary format suitable for binary data parser.
+    """
+
+    @staticmethod
+    def extract_row_binary(row_record) -> Optional[bytes]:
+        """
+        Extract binary data from a single RowRecord
+
+        Args:
+            row_record: sink_pb2.RowRecord protobuf message
+
+        Returns:
+            Concatenated binary data of row values, or None if empty
+        """
+        # Extract 'after' value if available (new/updated data), else 'before'
+        row_value = row_record.after if row_record.after and row_record.after.values else row_record.before
+        if not row_value or not row_value.values:
+            return None
+
+        # Concatenate all column values as bytes
+        binary_data = b""
+        for col_value in row_value.values:
+            binary_data += col_value.value
+
+        return binary_data if binary_data else None
+
+    @staticmethod
+    def extract_records_binary(row_records: List) -> List[bytes]:
+        """
+        Extract binary data from multiple RowRecords
+
+        Args:
+            row_records: List of sink_pb2.RowRecord messages
+
+        Returns:
+            List of binary data, skipping None entries
+        """
+        result = []
+        for record in row_records:
+            binary = RowRecordBinaryExtractor.extract_row_binary(record)
+            if binary is not None:
+                result.append(binary)
+        return result
         logger.info("RpcFetcher session closed")

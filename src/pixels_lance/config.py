@@ -12,10 +12,14 @@ from pydantic import BaseModel, Field
 
 
 class RpcConfig(BaseModel):
-    """RPC configuration"""
-    url: str = Field(..., description="RPC endpoint URL")
+    """RPC configuration - supports both HTTP-JSON and gRPC"""
+    url: str = Field(..., description="RPC endpoint URL (for HTTP-JSON)")
     timeout: int = Field(default=30, description="Request timeout in seconds")
     max_retries: int = Field(default=3, description="Maximum retry attempts")
+    # gRPC specific fields
+    grpc_host: Optional[str] = Field(default=None, description="gRPC server host")
+    grpc_port: int = Field(default=6688, description="gRPC server port")
+    use_grpc: bool = Field(default=False, description="Use gRPC instead of HTTP-JSON")
 
 
 class LanceDBConfig(BaseModel):
