@@ -1,0 +1,106 @@
+tables:
+  - name: customer
+    pk: [custID]
+    fields:
+      custID: int
+      companyID: int
+      gender: varchar(6)
+      name: varchar(15)
+      age: int
+      phone: varchar(11)
+      province: varchar(15)
+      city: varchar(15)
+      loan_balance: real
+      saving_credit: int
+      checking_credit: int
+      loan_credit: int
+      Isblocked: int
+      created_date: Date
+      last_update_timestamp: timestamp
+      freshness_ts: timestamp
+
+  - name: company
+    pk: [companyID]
+    fields:
+      companyID: int
+      name: varchar(60)
+      category: varchar(60)
+      staff_size: int
+      loan_balance: real
+      phone: varchar(11)
+      province: varchar(15)
+      city: varchar(15)
+      saving_credit: int
+      checking_credit: int
+      loan_credit: int
+      Isblocked: int
+      created_date: Date
+      last_update_timestamp: timestamp
+      freshness_ts: timestamp
+
+  - name: savingAccount
+    pk: [accountID]
+    fields:
+      accountID: int
+      userID: int
+      balance: real
+      Isblocked: int
+      ts: timestamp
+      freshness_ts: timestamp
+
+  - name: checkingAccount
+    pk: [accountID]
+    fields:
+      accountID: int
+      userID: int
+      balance: real
+      Isblocked: int
+      ts: timestamp
+      freshness_ts: timestamp
+
+  - name: transfer
+    pk: [id]
+    fields:
+      id: bigint
+      sourceID: int
+      targetID: int
+      amount: real
+      type: char(10)
+      ts: timestamp
+      freshness_ts: timestamp
+
+  - name: checking
+    pk: [id]
+    fields:
+      id: int
+      sourceID: int
+      targetID: int
+      amount: real
+      type: char(10)
+      ts: timestamp
+      freshness_ts: timestamp
+
+  - name: loanapps
+    pk: [id]
+    fields:
+      id: int
+      applicantID: int
+      amount: real
+      duration: int
+      status: char(12)
+      ts: timestamp
+      freshness_ts: timestamp
+
+  - name: loantrans
+    pk: [id]
+    fields:
+      id: int
+      applicantID: int
+      appID: int
+      amount: real
+      status: char(12)
+      ts: timestamp
+      duration: int
+      contract_timestamp: timestamp
+      delinquency: int
+      freshness_ts: timestamp
