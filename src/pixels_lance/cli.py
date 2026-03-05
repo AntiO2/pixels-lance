@@ -4,22 +4,21 @@ Command-line interface for Pixels Lance
 
 import argparse
 import sys
-import threading
-import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from .config import ConfigManager
-from .fetcher import RpcFetcher
+from .grpc_fetcher import PixelsGrpcFetcher
+from .fetcher import RowRecordBinaryExtractor
 from .logger import setup_logging
-from .parser import DataParser, Schema, SchemaCollection
+from .parser import DataParser
 from .storage import LanceDBStore
 
 
 def main() -> int:
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
-        description="RPC Binary Data Fetcher and LanceDB Storage"
+        description="Pixels Lance - gRPC Binary Data Fetcher and LanceDB Storage"
     )
 
     parser.add_argument(
@@ -30,17 +29,31 @@ def main() -> int:
     )
 
     parser.add_argument(
+        "--schema-file",
+        type=str,
+        default="config/schema_hybench.yaml",
+        help="Path to schema definition file",
+    )
+
+    parser.add_argument(
         "--schema",
         type=str,
-        default="config/schema.yaml",
-        help="Path to schema file",
+        required=True,
+        help="Database/schema name for gRPC polling",
     )
 
     parser.add_argument(
         "--table",
         type=str,
-        default=None,
-        help="Table name within a multi-table schema file",
+        required=True,
+        help="Table name to poll and store",
+    )
+
+    parser.add_argument(
+        "--bucket-id",
+        type=int,
+        action="append",
+        help="Bucket ID(s) to poll (can specify multiple times)",
     )
 
     parser.add_argument(
@@ -67,59 +80,85 @@ def main() -> int:
         config_manager = ConfigManager(args.config)
         config = config_manager.get()
 
-        # set up LanceDB store globally
-        store = LanceDBStore(config=config.lancedb)
-
-        # Determine schema type
-        schema_obj = Schema.from_yaml(args.schema)
-        table_names: List[str]
-        if isinstance(schema_obj, SchemaCollection):
-            # multiple tables in one file
-            table_names = list(schema_obj.schemas.keys())
-            if args.table:
-                if args.table not in table_names:
-                    raise ValueError(f"Table {args.table} not found in schema file")
-                table_names = [args.table]
-        else:
-            table_names = [schema_obj.table_name or args.table]
+        # Validate gRPC configuration
+        if not config.rpc.use_grpc:
+            print("Error: gRPC must be enabled in config. Set rpc.use_grpc: true", file=sys.stderr)
+            return 1
 
         print(f"Configuration loaded: {args.config}")
-        print(f"Schema file: {args.schema}")
-        print(f"Tables to process: {table_names}")
-        print(f"Batch size: {config.batch_size}")
+        print(f"Schema file: {args.schema_file}")
+        print(f"Database schema: {args.schema}")
+        print(f"Table: {args.table}")
+        print(f"Bucket IDs: {args.bucket_id or 'all'}")
+        print(f"gRPC host: {config.rpc.grpc_host}:{config.rpc.grpc_port}")
+        print(f"Dry run: {args.dry_run}")
 
-        def worker(table_name: str):
-            """Thread worker fetching and upserting for a given table"""
-            parser_obj = DataParser(schema_path=args.schema, table_name=table_name)
-            store.create_table(table_name=table_name)
-            fetcher = RpcFetcher(config=config.rpc)
+        # Initialize components
+        grpc_fetcher = PixelsGrpcFetcher(
+            host=config.rpc.grpc_host,
+            port=config.rpc.grpc_port,
+            timeout=config.rpc.timeout,
+        )
 
-            # placeholder loop; replace with actual RPC logic
-            while True:
-                # you should call actual rpc method here
-                data = fetcher.fetch(f"get_{table_name}")
-                if data is None:
-                    break
-                record = parser_obj.parse(data)
-                # perform upsert using primary key from schema
-                store.upsert(record, table_name=table_name, key=parser_obj.schema.pk)
-                time.sleep(0.1)
+        parser = DataParser(
+            schema_path=args.schema_file,
+            table_name=args.table
+        )
 
-        # start threads
-        threads = []
-        for tbl in table_names:
-            t = threading.Thread(target=worker, args=(tbl,))
-            t.start()
-            threads.append(t)
+        if not args.dry_run:
+            store = LanceDBStore(config=config.lancedb)
+            store.create_table(table_name=args.table)
 
-        # join threads
-        for t in threads:
-            t.join()
+        # Poll events from PixelsPollingService
+        print(f"Polling events for table '{args.table}' from schema '{args.schema}'...")
+        row_records = grpc_fetcher.poll_events(
+            schema_name=args.schema,
+            table_name=args.table,
+            buckets=args.bucket_id,
+        )
+
+        if not row_records:
+            print("No records received from gRPC service")
+            return 0
+
+        print(f"Received {len(row_records)} row records")
+
+        # Extract binary data from row records
+        binary_data_list = RowRecordBinaryExtractor.extract_records_binary(row_records)
+        print(f"Extracted {len(binary_data_list)} binary records")
+
+        if not binary_data_list:
+            print("No valid binary data extracted")
+            return 0
+
+        # Parse binary data
+        print("Parsing binary data...")
+        parsed_records = parser.parse_batch(binary_data_list)
+        print(f"Parsed {len(parsed_records)} records")
+
+        if not args.dry_run:
+            # Store in LanceDB with upsert
+            print(f"Upserting {len(parsed_records)} records to LanceDB table '{args.table}'...")
+            store.upsert(
+                records=parsed_records,
+                table_name=args.table,
+                pk=parser.schema.pk,
+            )
+            print(f"Successfully stored {len(parsed_records)} records")
+        else:
+            print(f"Dry run: Would have stored {len(parsed_records)} records")
+            # Print first record as example
+            if parsed_records:
+                print("Sample record:")
+                for key, value in parsed_records[0].items():
+                    print(f"  {key}: {value}")
 
         return 0
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         return 1
 
 

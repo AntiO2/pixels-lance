@@ -20,7 +20,24 @@ pip install -r requirements-dev.txt
 
 ### 基本使用
 
-#### HTTP-JSON RPC
+#### CLI 命令行使用
+```bash
+# 轮询 customer 表的所有 bucket 并存储到 LanceDB
+pixels-lance --schema tpch --table customer
+
+# 指定特定的 bucket IDs
+pixels-lance --schema tpch --table customer --bucket-id 0 --bucket-id 1
+
+# 仅解析数据，不存储到 LanceDB（dry run）
+pixels-lance --schema tpch --table customer --dry-run
+
+# 指定自定义配置文件和模式文件
+pixels-lance --config config/custom.yaml --schema-file config/schema_hybench.yaml --schema tpch --table customer
+```
+
+#### Python API 使用
+
+##### HTTP-JSON RPC
 ```python
 from pixels_lance import RpcFetcher, DataParser, LanceDBStore
 
@@ -34,7 +51,7 @@ for data in fetcher.fetch_batch([...]):
     store.upsert(parsed, table_name="customer", pk=["custID"])
 ```
 
-#### gRPC (PixelsPollingService)
+##### gRPC (PixelsPollingService)
 ```python
 from pixels_lance.grpc_fetcher import PixelsGrpcFetcher, RowRecordBinaryExtractor
 from pixels_lance.parser import DataParser
