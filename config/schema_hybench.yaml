@@ -140,7 +140,7 @@ schemas:
         precision: 3
 
   # Saving Account table: 32 bytes total
-  - table_name: savingAccount
+  - table_name: savingaccount
     pk: [accountID]
     fields:
       - name: accountID
@@ -172,7 +172,7 @@ schemas:
         precision: 3
 
   # Checking Account table: 32 bytes total
-  - table_name: checkingAccount
+  - table_name: checkingaccount
     pk: [accountID]
     fields:
       - name: accountID
