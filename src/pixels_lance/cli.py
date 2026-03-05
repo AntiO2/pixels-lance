@@ -57,6 +57,14 @@ def main() -> int:
     )
 
     parser.add_argument(
+        "--output",
+        type=str,
+        default="store",
+        choices=["store", "print"],
+        help="Output mode: 'store' to save to LanceDB, 'print' to display on screen (default: store)",
+    )
+
+    parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
@@ -67,10 +75,16 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run without saving to LanceDB",
+        help="Run without saving to LanceDB (equivalent to --output print)",
     )
 
     args = parser.parse_args()
+
+    # Handle output mode: dry-run overrides output setting
+    if args.dry_run:
+        output_mode = "print"
+    else:
+        output_mode = args.output
 
     # Setup logging
     setup_logging(args.log_level)
@@ -91,7 +105,7 @@ def main() -> int:
         print(f"Table: {args.table}")
         print(f"Bucket IDs: {args.bucket_id or 'all'}")
         print(f"gRPC host: {config.rpc.grpc_host}:{config.rpc.grpc_port}")
-        print(f"Dry run: {args.dry_run}")
+        print(f"Output mode: {output_mode}")
 
         # Initialize components
         grpc_fetcher = PixelsGrpcFetcher(
@@ -105,7 +119,9 @@ def main() -> int:
             table_name=args.table
         )
 
-        if not args.dry_run:
+        # Initialize store only if storing to database
+        store = None
+        if output_mode == "store":
             store = LanceDBStore(config=config.lancedb)
             store.create_table(table_name=args.table)
 
@@ -136,7 +152,7 @@ def main() -> int:
         parsed_records = parser.parse_batch(binary_data_list)
         print(f"Parsed {len(parsed_records)} records")
 
-        if not args.dry_run:
+        if output_mode == "store":
             # Store in LanceDB with upsert
             print(f"Upserting {len(parsed_records)} records to LanceDB table '{args.table}'...")
             store.upsert(
@@ -145,12 +161,12 @@ def main() -> int:
                 pk=parser.schema.pk,
             )
             print(f"Successfully stored {len(parsed_records)} records")
-        else:
-            print(f"Dry run: Would have stored {len(parsed_records)} records")
-            # Print first record as example
-            if parsed_records:
-                print("Sample record:")
-                for key, value in parsed_records[0].items():
+        else:  # output_mode == "print"
+            print(f"Print mode: Displaying {len(parsed_records)} records")
+            # Print all records
+            for i, record in enumerate(parsed_records):
+                print(f"\n--- Record {i+1} ---")
+                for key, value in record.items():
                     print(f"  {key}: {value}")
 
         return 0

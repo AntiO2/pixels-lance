@@ -28,7 +28,10 @@ pixels-lance --schema tpch --table customer
 # 指定特定的 bucket IDs
 pixels-lance --schema tpch --table customer --bucket-id 0 --bucket-id 1
 
-# 仅解析数据，不存储到 LanceDB（dry run）
+# 仅解析数据并打印到屏幕（不存储到数据库）
+pixels-lance --schema tpch --table customer --output print
+
+# 或者使用简写方式
 pixels-lance --schema tpch --table customer --dry-run
 
 # 指定自定义配置文件和模式文件
