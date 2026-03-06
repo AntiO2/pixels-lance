@@ -101,7 +101,7 @@ store.upsert(
     pk=["custID"]  # 主键
 )
 
-print(f"✓ 成功存储 {len(parsed_records)} 条记录")
+print(f"成功存储 {len(parsed_records)} 条记录")
 ```
 
 ### 查询存储的数据

@@ -17,20 +17,20 @@
 | transfer | 7 | 46 bytes |
 
 **串行拉取问题：**
-- ⏱️ 总耗时 = 表1 + 表2 + 表3 + ...
-- 🐌 CPU/网络利用率低
+- 总耗时 = 表1 + 表2 + 表3 + ...
+- CPU/网络利用率低
 
 **并行拉取优势：**
-- ⚡ 总耗时 ≈ MAX(表1, 表2, 表3, ...)
-- 🚀 充分利用多核 CPU 和网络带宽
+- 总耗时 ≈ MAX(表1, 表2, 表3, ...)
+- 充分利用多核 CPU 和网络带宽
 
 ---
 
-## 方式一：使用 fetch_all_tables.sh
+## 方式一：使用 scripts/fetch_all_tables.sh
 
 ### 1. 编辑配置
 
-修改 `fetch_all_tables.sh` 中的表列表：
+修改 `scripts/fetch_all_tables.sh` 中的表列表：
 
 ```bash
 TABLES=(
@@ -48,8 +48,8 @@ TABLES=(
 ### 2. 运行脚本
 
 ```bash
-chmod +x fetch_all_tables.sh
-./fetch_all_tables.sh
+chmod +x scripts/fetch_all_tables.sh
+./scripts/fetch_all_tables.sh
 ```
 
 ### 3. 查看输出
@@ -78,18 +78,18 @@ grep "成功存储" logs/*.log
 
 ## 方式二：使用 Python 脚本
 
-### 使用 fetch_all_tables.py
+### 使用 scripts/fetch_all_tables.py
 
 ```bash
-python fetch_all_tables.py
+python scripts/fetch_all_tables.py
 ```
 
 ### 脚本特点
 
-- ✅ 自动并发拉取所有表
-- ✅ 实时进度显示
-- ✅ 错误自动重试
-- ✅ 统计报告输出
+- 自动并发拉取所有表
+- 实时进度显示
+- 错误自动重试
+- 统计报告输出
 
 **示例输出：**
 ```
@@ -245,10 +245,10 @@ class FetcherPool:
 def fetch_table(table_name):
     try:
         # ... 拉取逻辑
-        return True, f"✓ {table_name}"
+        return True, f"{table_name} 成功"
     except Exception as e:
         logger.error(f"表 {table_name} 失败: {e}")
-        return False, f"✗ {table_name}: {e}"
+        return False, f"{table_name} 失败: {e}"
 ```
 
 ### 3. S3 写入冲突

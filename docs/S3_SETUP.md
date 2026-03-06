@@ -156,7 +156,7 @@ Final storage_options:
   region: us-east-2
   access_key_id: AKIA6DXO...
   secret_access_key: T0LxB+u6...
-✓ 配置正确
+配置正确
 ```
 
 ### 手动验证

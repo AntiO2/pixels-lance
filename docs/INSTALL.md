@@ -19,7 +19,7 @@
 ```bash
 git clone https://github.com/AntiO2/pixels-lance.git
 cd pixels-lance
-./install.sh
+./scripts/install.sh
 source .venv/bin/activate
 ```
 
@@ -73,12 +73,12 @@ pixels-lance --help
 pytest tests/ -v
 
 # 检查 Python 模块
-python -c "from pixels_lance import DataParser, LanceDBStore; print('✓ OK')"
+python -c "from pixels_lance import DataParser, LanceDBStore; print('OK')"
 ```
 
 **预期输出：**
 ```
-✓ OK
+OK
 ```
 
 ---

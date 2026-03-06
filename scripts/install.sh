@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
-# install.sh - Convenience installer for Pixels Lance
-#
-# This script sets up a Python virtual environment, installs the required
-# dependencies, and generates gRPC Python code from the bundled proto file.
-# It is intended for use on Unix-like systems (Linux, macOS).  The script is
-# idempotent and can be rerun to refresh the environment.
+# scripts/install.sh - Convenience installer for Pixels Lance
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV_DIR="$REPO_ROOT/.venv"
 PYTHON=${PYTHON:-python3}
 
 echo "[*] Pixels Lance installer"
 
 # check python availability
-if ! command -v $PYTHON >/dev/null 2>&1; then
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
     echo "Error: $PYTHON not found. Please install Python 3.8+." >&2
     exit 1
 fi
@@ -23,7 +19,7 @@ fi
 # create virtual environment if not present
 if [ ! -d "$VENV_DIR" ]; then
     echo "[*] Creating virtual environment at $VENV_DIR"
-    $PYTHON -m venv "$VENV_DIR"
+    "$PYTHON" -m venv "$VENV_DIR"
 fi
 
 # activate venv
