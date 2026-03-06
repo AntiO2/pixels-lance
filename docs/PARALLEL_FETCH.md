@@ -4,6 +4,24 @@
 
 ---
 
+## 快速开始
+
+### 最简单的命令
+
+```bash
+# Hybench 导入（推荐，Python 脚本）
+python3 scripts/fetch_all_tables.py
+
+# TPC-CH 导入
+python3 scripts/fetch_all_tables.py --schema-type chbenchmark
+
+# 或使用 Bash 脚本
+./scripts/fetch_all_tables.sh hybench store 4 300
+./scripts/fetch_all_tables.sh chbenchmark store 4 300
+```
+
+---
+
 ## 为什么需要并行拉取？
 
 在 HyBench 等基准测试中，通常需要同步多个表：
@@ -28,80 +46,255 @@
 
 ## 方式一：使用 scripts/fetch_all_tables.sh
 
-### 1. 编辑配置
-
-修改 `scripts/fetch_all_tables.sh` 中的表列表：
+### 命令语法
 
 ```bash
-TABLES=(
-  "customer"
-  "company"
-  "savingAccount"
-  "checkingAccount"
-  "transfer"
-  "checking"
-  "loanapps"
-  "loantrans"
-)
+./scripts/fetch_all_tables.sh [schema_type] [output_mode] [bucket_num] [timeout]
 ```
 
-### 2. 运行脚本
+### 参数说明
+
+| 参数 | 类型 | 说明 | 示例 |
+|------|------|------|------|
+| **schema_type** | 必需* | Benchmark 类型 | `hybench`, `chbenchmark`, `tpch` |
+| **output_mode** | 必需* | 数据输出方式 | `store`, `print` |
+| **bucket_num** | 必需* | Bucket数量，和pixels.properties保持一致 | `4`, `8`, `16` |
+| **timeout** | 可选 | 单个任务超时时间（秒） | `300`, `600`, `3600` |
+
+*如果不指定则使用默认值：`hybench`, `store`, `4`, `300`
+
+### 输出模式详解
+
+| 模式 | 说明 | 使用场景 |
+|------|------|----------|
+| **store** | 直接存储到 LanceDB | 正常数据导入，需要持久化 |
+| **print** | 打印到标准输出（JSON） | 调试、测试、查看样本数据 |
+
+### 常见用例
+
+#### 1. Hybench 导入（完整）
 
 ```bash
-chmod +x scripts/fetch_all_tables.sh
-./scripts/fetch_all_tables.sh
+# 默认配置（store 模式，4 分片，300s 超时）
+./scripts/fetch_all_tables.sh hybench store 4 300
+
+# 增加分片数（加快速度）
+./scripts/fetch_all_tables.sh hybench store 8 300
+
+# 增加超时时间（网络慢或数据量大）
+./scripts/fetch_all_tables.sh hybench store 4 600
 ```
 
-### 3. 查看输出
-
-脚本会为每个表创建单独的日志文件：
-
+**输出示例：**
 ```
-logs/
-├── customer.log
-├── company.log
-├── savingAccount.log
-└── ...
+======================================================
+并行拉取 hybench 所有表数据
+Schema Type: hybench
+Schema File: config/schema_hybench.yaml
+RPC Schema: pixels_bench
+Output Mode: store
+Buckets: 4 (0-3)
+Tables: 8 个
+Total Tasks: 32 任务
+Timeout: 300s per task
+======================================================
+[customer[B0]] 开始拉取数据...
+[customer[B1]] 开始拉取数据...
+[customer[B2]] 开始拉取数据...
+[customer[B3]] 开始拉取数据...
+[company[B0]] 开始拉取数据...
+...
+[customer[B0]] 成功
+[customer[B1]] 成功
+...
 ```
 
-### 4. 监控进度
+#### 2. TPC-CH 导入（完整）
 
 ```bash
-# 实时查看某个表的进度
-tail -f logs/customer.log
+# 标准配置
+./scripts/fetch_all_tables.sh chbenchmark store 4 300
 
-# 统计完成情况
-grep "成功存储" logs/*.log
+# 或别名方式
+./scripts/fetch_all_tables.sh tpch store 4 300
+```
+
+**支持的表（共 12 个）：**
+```
+warehouse, district, customer, history, neworder, order,
+orderline, item, stock, nation, supplier, region
+```
+
+#### 3. 调试模式（仅打印数据）
+
+```bash
+# 打印前 10 条记录（不存储）
+./scripts/fetch_all_tables.sh hybench print 1 300
+
+# 用于快速验证数据格式
+./scripts/fetch_all_tables.sh chbenchmark print 2 300
+```
+
+### 分片参数（bucket_num）
+
+**含义：** 数据被分成 N 个分片（bucket），并行拉取
+
+```
+总记录数 = N * bucket_size
+并行度 = bucket_num
+总耗时 ≈ 单个 bucket 耗时
+```
+
+**推荐值：**
+- 小数据集（<1GB）：`bucket_num=2` 或 `4`
+- 中等数据集（1-100GB）：`bucket_num=4` 或 `8`
+- 大数据集（>100GB）：`bucket_num=8` 或 `16`
+
+**性能对比：**
+```
+bucket_num=1: 串行，慢
+bucket_num=4: 4 个并行任务
+bucket_num=8: 8 个并行任务，需要更多 CPU/内存
+bucket_num=16: 极限并行，可能导致 RPC 限流
+```
+
+### 超时参数（timeout）
+
+**含义：** 单个 task（一个表的一个分片）的最大执行时间
+
+```
+timeout = 300s → 如果任务超过 5 分钟就认为失败
+```
+
+**选择建议：**
+- 开发/测试：`300` 秒
+- 生产（网络好）：`300-600` 秒
+- 网络慢或数据大：`600-1800` 秒
+
+### 监控进度
+
+```bash
+# 实时查看临时日志
+ls -lh /tmp/fetch_*.log | wc -l
+
+# 查看特定表的进度
+tail -f /tmp/fetch_customer_0.log
+
+# 统计成功的任务
+grep -r "Successfully" /tmp/fetch_*.log | wc -l
+
+# 统计失败的任务
+grep -r "Failed\|Error\|超时" /tmp/fetch_*.log | wc -l
 ```
 
 ---
 
 ## 方式二：使用 Python 脚本
 
-### 使用 scripts/fetch_all_tables.py
+### 命令语法
 
 ```bash
-python scripts/fetch_all_tables.py
+python3 scripts/fetch_all_tables.py [--schema-type TYPE] [--output-mode MODE] [--bucket-num N] [--workers W] [--tables T1 T2 ...]
 ```
 
-### 脚本特点
+### 参数说明
 
-- 自动并发拉取所有表
-- 实时进度显示
-- 错误自动重试
-- 统计报告输出
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| **--schema-type** | 可选 | `hybench` | Benchmark 类型：`hybench`, `chbenchmark`, `tpch` |
+| **--output-mode** | 可选 | `store` | 输出方式：`store`（存储）, `print`（打印） |
+| **--bucket-num** | 可选 | `4` | 分片数（并行度） |
+| **--workers** | 可选 | `8` | 并行工作线程数（表级别） |
+| **--tables** | 可选 | 全部 | 仅导入指定表（用空格分隔） |
 
-**示例输出：**
+### 常见用例
+
+#### 1. Hybench 导入（推荐用法）
+
+```bash
+# 默认配置（8 个表，4 个分片，8 个工作线程）
+python3 scripts/fetch_all_tables.py
+
+# 增加工作线程（加快速度）
+python3 scripts/fetch_all_tables.py --workers 16
+
+# 增加分片数（极限并行）
+python3 scripts/fetch_all_tables.py --bucket-num 8 --workers 16
+
+# 仅导入特定表
+python3 scripts/fetch_all_tables.py --tables customer company transfer
 ```
-开始并行拉取 8 个表...
-[customer] 完成 (100 条记录, 2.3s)
-[company] 完成 (50 条记录, 1.8s)
-[transfer] 失败 (连接超时)
-...
-总耗时: 5.6s
-成功: 7/8
-失败: 1/8
+
+#### 2. TPC-CH 导入
+
+```bash
+# 默认配置
+python3 scripts/fetch_all_tables.py --schema-type chbenchmark
+
+# 或使用别名
+python3 scripts/fetch_all_tables.py --schema-type tpch
+
+# 快速并行
+python3 scripts/fetch_all_tables.py --schema-type chbenchmark --workers 16 --bucket-num 8
 ```
+
+#### 3. 调试模式（打印数据）
+
+```bash
+# 打印数据（不存储）
+python3 scripts/fetch_all_tables.py --output-mode print
+
+# 仅调试某个表
+python3 scripts/fetch_all_tables.py --output-mode print --tables customer
+
+# 快速验证格式
+python3 scripts/fetch_all_tables.py --output-mode print --bucket-num 1 --workers 2
+```
+
+### Python vs Bash 脚本对比
+
+| 特性 | Bash | Python |
+|------|------|--------|
+| 参数风格 | 位置参数 | 命名参数（更易懂） |
+| 并行方式 | 纯 Bash 后台任务 | ThreadPoolExecutor（更高效） |
+| 表级并行 | 有限 | ✓ 多个表真正并行 |
+| 错误处理 | 基础 | ✓ 更详细 |
+| 易用性 | 简单 | ✓ 推荐 |
+
+### 性能建议
+
+```bash
+# 小集群（<4 核）
+python3 scripts/fetch_all_tables.py --workers 4 --bucket-num 2
+
+# 中型集群（4-8 核）
+python3 scripts/fetch_all_tables.py --workers 8 --bucket-num 4
+
+# 大型集群（>8 核）
+python3 scripts/fetch_all_tables.py --workers 16 --bucket-num 8
+
+# 网络好的极限并行
+python3 scripts/fetch_all_tables.py --workers 32 --bucket-num 16
+```
+
+---
+
+## Bash vs Python 方式选择
+
+**使用 Bash 脚本（fetch_all_tables.sh）：**
+- ✓ 简单快速
+- ✓ 无 Python 环境依赖
+- ✗ 参数固定的位置顺序
+- ✗ 并行度有限制
+
+**使用 Python 脚本（fetch_all_tables.py）：**  
+- ✓ 参数更灵活（命名参数）
+- ✓ 更好的并行性能
+- ✓ 更详细的进度和错误信息
+- ✓ 支持表级选择
+- ✗ 需要 Python 3.8+
+
+**推荐：优先使用 Python 脚本
 
 ---
 
@@ -214,17 +407,6 @@ class FetcherPool:
 ---
 
 ## 性能对比
-
-以 8 个表为例（本地测试）：
-
-| 模式 | 总耗时 | CPU 利用率 |
-|------|--------|-----------|
-| 串行 | ~24s | 25% |
-| 2 并发 | ~12s | 50% |
-| 4 并发 | ~6s | 90% |
-| 8 并发 | ~4s | 95% |
-
-**结论：** 并发数 = CPU 核心数时性价比最高
 
 ---
 

@@ -4,6 +4,7 @@ Command-line interface for Pixels Lance
 
 import argparse
 import sys
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -12,10 +13,81 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import ConfigManager
 from grpc_fetcher import PixelsGrpcFetcher
 from fetcher import RowRecordBinaryExtractor
-from logger import setup_logging
+from logger import setup_logging, get_logger
 from parser import DataParser
 from storage import LanceDBStore
 import proto.sink_pb2 as sink_pb2
+
+logger = get_logger(__name__)
+
+
+def _flush_batch(insert_update_batch, delete_batch, parser, store, table_name, output_mode, logger):
+    """
+    Flush accumulated batch records to storage.
+    
+    Args:
+        insert_update_batch: List of INSERT/UPDATE/SNAPSHOT binary column values
+        delete_batch: List of DELETE binary column values
+        parser: DataParser instance
+        store: LanceDBStore instance
+        table_name: Target table name
+        output_mode: "store" or "print"
+        logger: Logger instance
+    """
+    # Process INSERT/UPDATE/SNAPSHOT records
+    if insert_update_batch:
+        print(f"Flushing {len(insert_update_batch)} INSERT/UPDATE/SNAPSHOT records")
+        
+        try:
+            # Parse binary data
+            parsed_records = parser.parse_batch(insert_update_batch, op_type="INSERT")
+            print(f"Parsed {len(parsed_records)} records")
+
+            if output_mode == "store":
+                # Store in LanceDB with upsert
+                print(f"Upserting {len(parsed_records)} records to LanceDB table '{table_name}'...")
+                store.upsert(
+                    records=parsed_records,
+                    table_name=table_name,
+                    pk=parser.schema.pk,
+                    schema=parser.schema.to_pyarrow_schema(),
+                )
+                print(f"Successfully stored {len(parsed_records)} records")
+            else:  # output_mode == "print"
+                print(f"Print mode: Displaying {len(parsed_records)} records")
+                for i, record in enumerate(parsed_records):
+                    field_values = [f"{key}={repr(value)}" for key, value in record.items()]
+                    print(f"Record {i+1}: {', '.join(field_values)}")
+        except Exception as e:
+            print(f"Error processing INSERT/UPDATE/SNAPSHOT batch: {e}")
+            logger.exception(f"Failed to process batch of {len(insert_update_batch)} records")
+
+    # Process DELETE records
+    if delete_batch:
+        print(f"Flushing {len(delete_batch)} DELETE records")
+        
+        try:
+            # Parse binary data for delete records
+            delete_parsed_records = parser.parse_batch(delete_batch, op_type="DELETE")
+            print(f"Parsed {len(delete_parsed_records)} delete records")
+
+            if output_mode == "store":
+                # Delete from LanceDB
+                print(f"Deleting {len(delete_parsed_records)} records from LanceDB table '{table_name}'...")
+                store.delete(
+                    records=delete_parsed_records,
+                    table_name=table_name,
+                    pk=parser.schema.pk,
+                )
+                print(f"Successfully deleted {len(delete_parsed_records)} records")
+            else:  # output_mode == "print"
+                print(f"Print mode: Would delete {len(delete_parsed_records)} records")
+                for i, record in enumerate(delete_parsed_records):
+                    field_types = [f"{key}={type(value).__name__}" for key, value in record.items()]
+                    print(f"Delete Record {i+1}: {', '.join(field_types)}")
+        except Exception as e:
+            print(f"Error processing DELETE batch: {e}")
+            logger.exception(f"Failed to process delete batch of {len(delete_batch)} records")
 
 
 def main() -> int:
@@ -34,8 +106,8 @@ def main() -> int:
     parser.add_argument(
         "--schema-file",
         type=str,
-        default="config/schema_hybench.yaml",
-        help="Path to schema definition file",
+        default=None,
+        help="Path to schema definition file (default: from config.yaml parser.schema_file)",
     )
 
     parser.add_argument(
@@ -96,6 +168,9 @@ def main() -> int:
         # Load configuration
         config_manager = ConfigManager(args.config)
         config = config_manager.get()
+        
+        # Use schema_file from config if not specified via CLI
+        schema_file = args.schema_file if args.schema_file else config.parser.schema_file
 
         # Validate gRPC configuration
         if not config.rpc.use_grpc:
@@ -103,7 +178,7 @@ def main() -> int:
             return 1
 
         print(f"Configuration loaded: {args.config}")
-        print(f"Schema file: {args.schema_file}")
+        print(f"Schema file: {schema_file}")
         print(f"Database schema: {args.schema}")
         print(f"Table: {args.table}")
         print(f"Bucket IDs: {args.bucket_id or 'all'}")
@@ -118,7 +193,7 @@ def main() -> int:
         )
 
         parser = DataParser(
-            schema_path=args.schema_file,
+            schema_path=schema_file,
             table_name=args.table
         )
 
@@ -134,6 +209,15 @@ def main() -> int:
         
         # Continuous polling loop
         import time
+        # Get batch parameters from config
+        batch_size = config.rpc.batch_size
+        batch_timeout = config.rpc.batch_timeout
+        
+        # Batch buffers for streaming processing
+        insert_update_batch = []
+        delete_batch = []
+        last_flush_time = time.time()
+
         try:
             while True:
                 row_records = grpc_fetcher.poll_events(
@@ -143,7 +227,20 @@ def main() -> int:
                 )
 
                 if not row_records:
-                    print("No records received, waiting for next poll...")
+                    print("No records received, checking if batch should be flushed...")
+                    # Check if batch should be flushed due to timeout
+                    if insert_update_batch or delete_batch:
+                        elapsed = time.time() - last_flush_time
+                        if elapsed > batch_timeout:
+                            print(f"Batch timeout ({batch_timeout}s) reached, flushing batch...")
+                            _flush_batch(
+                                insert_update_batch, delete_batch, 
+                                parser, store, args.table, output_mode, logger
+                            )
+                            insert_update_batch.clear()
+                            delete_batch.clear()
+                            last_flush_time = time.time()
+                    
                     time.sleep(1)  # Wait 1 second before next poll
                     continue
 
@@ -158,79 +255,26 @@ def main() -> int:
                     time.sleep(1)
                     continue
 
-                # Group records by operation type
-                insert_update_records = []
-                delete_records = []
-                
+                # Group records by operation type and add to batch buffers
                 for op_type, column_values in extracted_data:
                     if op_type in (sink_pb2.OperationType.INSERT, sink_pb2.OperationType.UPDATE, sink_pb2.OperationType.SNAPSHOT):
-                        insert_update_records.append(column_values)
+                        insert_update_batch.append(column_values)
                     elif op_type == sink_pb2.OperationType.DELETE:
-                        delete_records.append(column_values)
+                        delete_batch.append(column_values)
 
-                # Process INSERT/UPDATE/SNAPSHOT records
-                if insert_update_records:
-                    print(f"Processing {len(insert_update_records)} INSERT/UPDATE/SNAPSHOT records")
-                    
-                    # Parse binary data
-                    print("Parsing binary data...")
-                    parsed_records = parser.parse_batch(insert_update_records)
-                    print(f"Parsed {len(parsed_records)} records")
-
-                    # Debug: Check first record
-                    if insert_update_records and parsed_records:
-                        first_columns = insert_update_records[0]
-                        print(f"First record has {len(first_columns)} columns")
-                        # Show all columns with their byte lengths
-                        for i, col_data in enumerate(first_columns):
-                            field_name = parser.schema.fields[i].name if i < len(parser.schema.fields) else f"column_{i}"
-                            print(f"  Column {i} ({field_name}): {len(col_data)} bytes, hex={col_data.hex()[:40]}...")
-                        
-                        first_record = parsed_records[0]
-                        print(f"First parsed record has {len(first_record)} fields")
-                        for key, value in first_record.items():
-                            print(f"  {key}: {repr(value)} (type: {type(value).__name__})")
-
-                    if output_mode == "store":
-                        # Store in LanceDB with upsert
-                        print(f"Upserting {len(parsed_records)} records to LanceDB table '{args.table}'...")
-                        store.upsert(
-                            records=parsed_records,
-                            table_name=args.table,
-                            pk=parser.schema.pk,
-                        )
-                        print(f"Successfully stored {len(parsed_records)} records")
-                    else:  # output_mode == "print"
-                        print(f"Print mode: Displaying {len(parsed_records)} records")
-                        # Print all records (one line per record, showing field values)
-                        for i, record in enumerate(parsed_records):
-                            field_values = [f"{key}={repr(value)}" for key, value in record.items()]
-                            print(f"Record {i+1}: {', '.join(field_values)}")
-                # Process DELETE records
-                if delete_records:
-                    print(f"Processing {len(delete_records)} DELETE records")
-                    
-                    # Parse binary data for delete records
-                    print("Parsing delete records...")
-                    delete_parsed_records = parser.parse_batch(delete_records)
-                    print(f"Parsed {len(delete_parsed_records)} delete records")
-
-                    if output_mode == "store":
-                        # Delete from LanceDB
-                        print(f"Deleting {len(delete_parsed_records)} records from LanceDB table '{args.table}'...")
-                        store.delete(
-                            records=delete_parsed_records,
-                            table_name=args.table,
-                            key=parser.schema.pk,
-                        )
-                        print(f"Successfully deleted {len(delete_parsed_records)} records")
-                    else:  # output_mode == "print"
-                        print(f"Print mode: Would delete {len(delete_parsed_records)} records")
-                        # Print delete records
-                        for i, record in enumerate(delete_parsed_records):
-                            field_types = [f"{key}={type(value).__name__}" for key, value in record.items()]
-                            print(f"Delete Record {i+1}: {', '.join(field_types)}")
+                # Check if batch size reached
+                total_batch_size = len(insert_update_batch) + len(delete_batch)
+                if total_batch_size >= batch_size:
+                    print(f"Batch size ({batch_size}) reached ({total_batch_size} records), flushing...")
+                    _flush_batch(
+                        insert_update_batch, delete_batch, 
+                        parser, store, args.table, output_mode, logger
+                    )
+                    insert_update_batch.clear()
+                    delete_batch.clear()
+                    last_flush_time = time.time()
                 
+
                 # Wait before next poll
                 time.sleep(1)
         except KeyboardInterrupt:

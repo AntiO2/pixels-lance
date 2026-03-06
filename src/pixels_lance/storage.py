@@ -2,6 +2,7 @@
 Lance storage module
 """
 
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -74,6 +75,27 @@ class LanceDBStore:
         
         self.table = None
         self.table_name = None
+
+    @staticmethod
+    def _is_dataset_already_exists_error(err: Exception) -> bool:
+        """Detect race condition where another process created dataset first."""
+        msg = str(err).lower()
+        return "already exists" in msg or "dataset already exists" in msg
+
+    @staticmethod
+    def _is_retryable_write_error(err: Exception) -> bool:
+        """Detect transient/retryable write errors on object stores."""
+        msg = str(err).lower()
+        retry_keywords = [
+            "already exists",
+            "conflict",
+            "precondition",
+            "conditionnotmet",
+            "timeout",
+            "temporarily unavailable",
+            "resource busy",
+        ]
+        return any(k in msg for k in retry_keywords)
 
     def _get_dataset_path(self, table_name: str) -> str:
         """Get the full path for a dataset"""
@@ -192,6 +214,7 @@ class LanceDBStore:
         records: Union[Dict[str, Any], List[Dict[str, Any]]],
         table_name: Optional[str] = None,
         pk: Optional[Union[str, List[str]]] = None,
+        schema: Optional[Any] = None,
     ) -> None:
         """
         Perform merge-insert (upsert) using Lance merge_insert API.
@@ -200,6 +223,8 @@ class LanceDBStore:
             records: record or list of records
             table_name: table name to operate on
             pk: primary key field(s) used for matching
+            schema: Optional PyArrow schema (from parser.schema.to_pyarrow_schema())
+                   If provided, will strictly enforce this schema for type consistency
         """
         table_name = table_name or self.config.table_name
         dataset_path = self._get_dataset_path(table_name)
@@ -210,42 +235,118 @@ class LanceDBStore:
         if pk is None:
             raise ValueError("Primary key must be provided for upsert")
 
-        # Convert to pyarrow table
-        pa_table = pa.Table.from_pylist(records)
+        # De-duplicate source rows by primary key to avoid
+        # "Ambiguous merge insert: multiple source rows match the same target row"
+        pk_fields = [pk] if isinstance(pk, str) else list(pk)
+        dedup_map: Dict[Any, Dict[str, Any]] = {}
 
-        # Check if dataset exists
+        for record in records:
+            key = tuple(record.get(field) for field in pk_fields)
+            # Keep the last occurrence in current batch
+            dedup_map[key] = record
+
+        deduped_records = list(dedup_map.values())
+        if len(deduped_records) != len(records):
+            logger.warning(
+                "Detected duplicate primary keys in source batch; deduplicated before upsert",
+                extra={
+                    "table_name": table_name,
+                    "source_records": len(records),
+                    "deduped_records": len(deduped_records),
+                    "dropped_duplicates": len(records) - len(deduped_records),
+                    "pk_fields": pk_fields,
+                },
+            )
+
+        # Get dataset path once for reuse
+        dataset_path = self._get_dataset_path(table_name)
+        
+        # Check if dataset exists and get its schema for consistent type handling
         dataset_exists = False
+        existing_dataset = None
         try:
             if self.storage_options:
-                lance.dataset(dataset_path, storage_options=self.storage_options)
+                existing_dataset = lance.dataset(dataset_path, storage_options=self.storage_options)
             else:
-                lance.dataset(dataset_path)
+                existing_dataset = lance.dataset(dataset_path)
             dataset_exists = True
         except Exception:
             pass
 
+        # Convert to pyarrow table with explicit schema if provided
+        # Using explicit schema ensures nullable fields are properly typed from schema.yaml
+        if schema is not None:
+            # Use provided schema to ensure type consistency across batches
+            pa_table = pa.Table.from_pylist(deduped_records, schema=schema)
+        else:
+            # No schema provided, try to get it from existing dataset
+            if dataset_exists and existing_dataset:
+                # Use existing dataset schema to ensure type compatibility
+                # This is critical for fields that are nullable but may have all NULL values in a batch
+                target_schema = existing_dataset.schema
+                pa_table = pa.Table.from_pylist(deduped_records, schema=target_schema)
+            else:
+                # No existing dataset and no schema provided, create table with inferred schema
+                pa_table = pa.Table.from_pylist(deduped_records)
+
         if not dataset_exists:
             # Dataset doesn't exist, create it with initial data
             logger.info(f"Dataset does not exist, creating new dataset at {dataset_path}")
-            if self.storage_options:
-                lance.write_dataset(pa_table, dataset_path, storage_options=self.storage_options)
-            else:
-                lance.write_dataset(pa_table, dataset_path)
-            logger.info("Upsert completed (created new dataset)", extra={"table_name": table_name, "records": len(records)})
-        else:
-            # Dataset exists, perform merge_insert
-            if self.storage_options:
-                dataset = lance.dataset(dataset_path, storage_options=self.storage_options)
-            else:
-                dataset = lance.dataset(dataset_path)
+            try:
+                if self.storage_options:
+                    lance.write_dataset(pa_table, dataset_path, storage_options=self.storage_options)
+                else:
+                    lance.write_dataset(pa_table, dataset_path)
+                logger.info(
+                    "Upsert completed (created new dataset)",
+                    extra={"table_name": table_name, "records": len(deduped_records)},
+                )
+                return
+            except Exception as e:
+                # Another process may have created it first; fall through to merge_insert
+                if self._is_dataset_already_exists_error(e):
+                    logger.warning(
+                        "Dataset was created by another process, switching to merge_insert",
+                        extra={"table_name": table_name, "error": str(e)},
+                    )
+                else:
+                    raise
 
-            # Build merge_insert operation
-            op = dataset.merge_insert(pk)
-            op = op.when_matched_update_all()
-            op = op.when_not_matched_insert_all()
-            op.execute(pa_table)
-            
-            logger.info("Upsert completed", extra={"table_name": table_name, "records": len(records)})
+        # Dataset exists, perform merge_insert with retry
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                if self.storage_options:
+                    dataset = lance.dataset(dataset_path, storage_options=self.storage_options)
+                else:
+                    dataset = lance.dataset(dataset_path)
+
+                # Build merge_insert operation
+                op = dataset.merge_insert(pk)
+                op = op.when_matched_update_all()
+                op = op.when_not_matched_insert_all()
+                op.execute(pa_table)
+
+                logger.info(
+                    "Upsert completed",
+                    extra={"table_name": table_name, "records": len(deduped_records), "attempt": attempt},
+                )
+                return
+            except Exception as e:
+                if attempt < max_retries and self._is_retryable_write_error(e):
+                    sleep_seconds = 0.2 * attempt
+                    logger.warning(
+                        "Upsert failed with retryable error, retrying",
+                        extra={
+                            "table_name": table_name,
+                            "attempt": attempt,
+                            "sleep_seconds": sleep_seconds,
+                            "error": str(e),
+                        },
+                    )
+                    time.sleep(sleep_seconds)
+                    continue
+                raise
 
     def delete(
         self,
@@ -282,12 +383,25 @@ class LanceDBStore:
             pk_values = [record[pk] for record in records]
             where_clause = f"{pk} IN ({', '.join(repr(v) for v in pk_values)})"
         else:
-            # Composite primary key - this is more complex, for now assume single key
-            raise ValueError("Composite primary keys not yet supported for delete")
+            # Composite primary key - build OR clause for each record's PK combination
+            pk_fields = list(pk)
+            conditions = []
+            for record in records:
+                pk_value_pairs = [f"{field}={repr(record[field])}" for field in pk_fields]
+                condition = " AND ".join(pk_value_pairs)
+                conditions.append(f"({condition})")
+            where_clause = " OR ".join(conditions)
 
         # Execute delete
         dataset.delete(where_clause)
-        logger.info("Delete completed", extra={"table_name": table_name, "records": len(records)})
+        logger.info(
+            "Delete completed",
+            extra={
+                "table_name": table_name,
+                "records": len(records),
+                "pk_fields": pk if isinstance(pk, list) else [pk],
+            }
+        )
 
     def query(
         self,

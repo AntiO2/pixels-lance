@@ -167,7 +167,11 @@ class Schema:
             )
             for f in data.get("fields", [])
         ]
-        pk = data.get("pk") or []
+        # Support both 'pk' and 'primary_key' field names
+        pk = data.get("pk") or data.get("primary_key") or []
+        # Ensure pk is always a list
+        if isinstance(pk, str):
+            pk = [pk]
         return cls(fields, table_name=data.get("table_name"), pk=pk)
 
     @classmethod
@@ -176,8 +180,8 @@ class Schema:
 
         If the YAML contains a single schema (dict with fields) this returns a
         `Schema`.  When the file contains a top-level list of schema dicts, or a
-        dict with a "schemas" key, a ``SchemaCollection`` is returned.  This
-        allows benchmarks with multiple tables to share one file.
+        dict with a "schemas" or "tables" key, a ``SchemaCollection`` is returned.  
+        This allows benchmarks with multiple tables to share one file.
         """
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
@@ -186,18 +190,110 @@ class Schema:
         if isinstance(data, dict) and "fields" in data:
             return cls.from_dict(data)
 
-        # multiple schemas (standard format: list or dict with "schemas" key)
+        # multiple schemas (standard format: list or dict with "schemas"/"tables" key)
         items = None
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict) and "schemas" in data:
             items = data["schemas"]
+        elif isinstance(data, dict) and "tables" in data:
+            # Convert tables dict to list format expected by SchemaCollection
+            items = list(data["tables"].values())
 
         if items is not None:
             return SchemaCollection.from_list(items)
 
         # fallback: try to interpret as single schema
         return cls.from_dict(data)
+
+    def to_pyarrow_schema(self) -> "pa.Schema":
+        """Convert schema to PyArrow schema respecting nullable flags from YAML
+        
+        This ensures that fields marked as nullable in schema.yaml are properly
+        typed as nullable in PyArrow, even if all values are NULL in a batch.
+        
+        Also adds Lance primary key metadata to field metadata for unenforced primary keys.
+        For primary key fields, validates they are non-nullable as required by Lance.
+        """
+        try:
+            import pyarrow as pa
+        except ImportError:
+            raise ImportError("PyArrow is required for to_pyarrow_schema()")
+        
+        pa_fields = []
+        
+        # If primary key is defined, validate and track field positions
+        pk_positions = {}
+        if self.pk:
+            for i, pk_field in enumerate(self.pk, 1):
+                pk_positions[pk_field.lower()] = i
+        
+        for field in self.fields:
+            pa_type = self._get_pyarrow_type(field.type)
+            
+            # Build field metadata for Lance primary key support
+            metadata = {}
+            field_name_lower = field.name.lower()
+            
+            if field_name_lower in pk_positions:
+                # Validate primary key constraints
+                if field.nullable:
+                    logger.warning(
+                        f"Primary key field '{field.name}' is marked as nullable, "
+                        f"but Lance requires primary key fields to be non-nullable. "
+                        f"Overriding to nullable=False."
+                    )
+                    field.nullable = False
+                
+                # Add Lance primary key metadata
+                metadata[b"lance-schema:unenforced-primary-key"] = b"true"
+                position = pk_positions[field_name_lower]
+                metadata[b"lance-schema:unenforced-primary-key:position"] = str(position).encode("utf-8")
+            
+            pa_field = pa.field(field.name, pa_type, nullable=field.nullable, metadata=metadata)
+            pa_fields.append(pa_field)
+        
+        return pa.schema(pa_fields)
+    
+    def _get_pyarrow_type(self, field_type: str) -> "pa.DataType":
+        """Map schema field type to PyArrow type"""
+        try:
+            import pyarrow as pa
+        except ImportError:
+            raise ImportError("PyArrow is required for _get_pyarrow_type()")
+        
+        # Map schema types to PyArrow types
+        type_map = {
+            "int8": pa.int8(),
+            "int16": pa.int16(),
+            "int32": pa.int32(),
+            "int64": pa.int64(),
+            "uint8": pa.uint8(),
+            "uint16": pa.uint16(),
+            "uint32": pa.uint32(),
+            "uint64": pa.uint64(),
+            "float32": pa.float32(),
+            "float64": pa.float64(),
+            "varchar": pa.string(),
+            "char": pa.string(),
+            "string": pa.string(),
+            "bytes": pa.binary(),
+            "binary": pa.binary(),
+            "varbinary": pa.binary(),
+            "date": pa.date32(),
+            "time": pa.time64("us"),  # microseconds (only unit time64 supports)
+            "timestamp": pa.timestamp("ms"),
+            "timestamp_with_tz": pa.timestamp("ms", tz="UTC"),
+            "boolean": pa.bool_(),
+            "decimal": pa.decimal128(38, 10),  # Default precision/scale
+        }
+        
+        pa_type = type_map.get(field_type.lower())
+        if pa_type is None:
+            # Default to string if type not recognized
+            logger.warning(f"Unknown field type '{field_type}', defaulting to string")
+            return pa.string()
+        return pa_type
 
 
 
@@ -269,31 +365,62 @@ class DataParser:
 
         logger.info("DataParser initialized", extra={"field_count": len(self.schema.fields)})
 
-    def parse(self, column_values: List[bytes]) -> Dict[str, Any]:
+    def parse(self, column_values: List[bytes], op_type: str = "INSERT") -> Dict[str, Any]:
         """
         Parse column values according to schema
 
         Args:
             column_values: List of binary data, one per column (in schema field order)
+                - For INSERT/SNAPSHOT: contains only 'after' columns
+                - For UPDATE: contains 'before' columns followed by 'after' columns (2N columns)
+                - For DELETE: contains only 'before' columns
+            op_type: Operation type - "INSERT", "UPDATE", "DELETE", "SNAPSHOT"
 
         Returns:
-            Dictionary with field names as keys and parsed values
+            Dictionary with field names as keys and parsed values (uses 'after' for UPDATE)
         """
         result = {}
+        op_type = op_type.upper()
+        num_fields = len(self.schema.fields)
 
-        if len(column_values) != len(self.schema.fields):
+        # Calculate expected column count based on operation type
+        if op_type in ("INSERT", "SNAPSHOT"):
+            expected_cols = num_fields
+            start_idx = 0  # Start from first column
+        elif op_type == "UPDATE":
+            expected_cols = 2 * num_fields  # before + after
+            start_idx = num_fields  # Start from 'after' section (skip 'before')
+        elif op_type == "DELETE":
+            expected_cols = num_fields  # Only 'before' columns
+            start_idx = 0
+        else:
+            logger.warning(f"Unknown operation type: {op_type}, treating as INSERT")
+            expected_cols = num_fields
+            start_idx = 0
+
+        # Validate column count
+        if len(column_values) != expected_cols:
+            field_names = [f.name for f in self.schema.fields]
             logger.error(
-                "Column count mismatch",
+                "Column count mismatch for operation",
                 extra={
-                    "expected": len(self.schema.fields),
+                    "operation": op_type,
+                    "expected": expected_cols,
+                    "expected_fields": field_names,
                     "received": len(column_values),
+                    "column_sizes": [len(c) if c else 0 for c in column_values],
                 },
             )
+            # Try to handle gracefully - if we have too many columns, skip extras
+            if len(column_values) > expected_cols:
+                column_values = column_values[:expected_cols]
             
+        # Parse fields from the appropriate section
         for i, field in enumerate(self.schema.fields):
             try:
-                if i < len(column_values):
-                    value = self._parse_field_value(column_values[i], field)
+                col_idx = start_idx + i
+                if col_idx < len(column_values):
+                    value = self._parse_field_value(column_values[col_idx], field)
                     result[field.name] = value
                 else:
                     result[field.name] = None if field.nullable else field.name + "_MISSING"
@@ -302,9 +429,10 @@ class DataParser:
                     "Failed to parse field",
                     extra={
                         "field": field.name,
+                        "operation": op_type,
                         "type": field.type,
-                        "column_index": i,
-                        "data_len": len(column_values[i]) if i < len(column_values) else 0,
+                        "column_index": start_idx + i,
+                        "data_len": len(column_values[start_idx + i]) if (start_idx + i) < len(column_values) else 0,
                         "error": str(e)
                     },
                 )
@@ -516,14 +644,15 @@ class DataParser:
         
         return False
 
-    def parse_batch(self, data_list: List[List[bytes]]) -> List[Dict[str, Any]]:
+    def parse_batch(self, data_list: List[List[bytes]], op_type: str = "INSERT") -> List[Dict[str, Any]]:
         """
         Parse multiple records (each record is a list of column values)
 
         Args:
             data_list: List of records, where each record is a list of column binary values
+            op_type: Operation type - "INSERT", "UPDATE", "DELETE", "SNAPSHOT"
 
         Returns:
             List of parsed dictionaries
         """
-        return [self.parse(column_values) for column_values in data_list]
+        return [self.parse(column_values, op_type=op_type) for column_values in data_list]

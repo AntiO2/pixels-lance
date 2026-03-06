@@ -1,0 +1,986 @@
+# TPC-CH Benchmark Schema Definitions
+# Binary layout for 12 tables with precise offset calculations
+# All integers are big-endian, floats are IEEE 754 big-endian, chars are UTF-8 fixed-width
+
+tables:
+  warehouse:
+    table_name: warehouse
+    record_size: 101
+    primary_key: w_id
+    fields:
+      - name: w_id
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Warehouse ID"
+
+      - name: w_name
+        type: char
+        size: 10
+        offset: 4
+        nullable: false
+        charset: utf-8
+        description: "Warehouse name"
+
+      - name: w_street_1
+        type: char
+        size: 20
+        offset: 14
+        nullable: false
+        charset: utf-8
+        description: "Street address line 1"
+
+      - name: w_street_2
+        type: char
+        size: 20
+        offset: 34
+        nullable: false
+        charset: utf-8
+        description: "Street address line 2"
+
+      - name: w_city
+        type: char
+        size: 20
+        offset: 54
+        nullable: false
+        charset: utf-8
+        description: "City"
+
+      - name: w_state
+        type: char
+        size: 2
+        offset: 74
+        nullable: false
+        charset: utf-8
+        description: "State code"
+
+      - name: w_zip
+        type: char
+        size: 9
+        offset: 76
+        nullable: false
+        charset: utf-8
+        description: "ZIP code"
+
+      - name: w_tax
+        type: float32
+        size: 4
+        offset: 85
+        nullable: false
+        description: "Tax rate"
+
+      - name: w_ytd
+        type: float32
+        size: 4
+        offset: 89
+        nullable: false
+        description: "Year-to-date sales"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 93
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  district:
+    table_name: district
+    record_size: 109
+    primary_key:
+      - d_w_id
+      - d_id
+    fields:
+      - name: d_id
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "District ID"
+
+      - name: d_w_id
+        type: int32
+        size: 4
+        offset: 4
+        nullable: false
+        description: "Warehouse ID"
+
+      - name: d_name
+        type: char
+        size: 10
+        offset: 8
+        nullable: false
+        charset: utf-8
+        description: "District name"
+
+      - name: d_street_1
+        type: char
+        size: 20
+        offset: 18
+        nullable: false
+        charset: utf-8
+        description: "Street address line 1"
+
+      - name: d_street_2
+        type: char
+        size: 20
+        offset: 38
+        nullable: false
+        charset: utf-8
+        description: "Street address line 2"
+
+      - name: d_city
+        type: char
+        size: 20
+        offset: 58
+        nullable: false
+        charset: utf-8
+        description: "City"
+
+      - name: d_state
+        type: char
+        size: 2
+        offset: 78
+        nullable: false
+        charset: utf-8
+        description: "State code"
+
+      - name: d_zip
+        type: char
+        size: 9
+        offset: 80
+        nullable: false
+        charset: utf-8
+        description: "ZIP code"
+
+      - name: d_tax
+        type: float32
+        size: 4
+        offset: 89
+        nullable: false
+        description: "Tax rate"
+
+      - name: d_ytd
+        type: float32
+        size: 4
+        offset: 93
+        nullable: false
+        description: "Year-to-date sales"
+
+      - name: d_next_o_id
+        type: int32
+        size: 4
+        offset: 97
+        nullable: false
+        description: "Next order ID"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 101
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  customer:
+    table_name: customer
+    record_size: 675
+    primary_key:
+      - c_w_id
+      - c_d_id
+      - c_id
+    fields:
+      - name: c_id
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Customer ID"
+
+      - name: c_d_id
+        type: int32
+        size: 4
+        offset: 4
+        nullable: false
+        description: "District ID"
+
+      - name: c_w_id
+        type: int32
+        size: 4
+        offset: 8
+        nullable: false
+        description: "Warehouse ID"
+
+      - name: c_first
+        type: char
+        size: 16
+        offset: 12
+        nullable: false
+        charset: utf-8
+        description: "First name"
+
+      - name: c_middle
+        type: char
+        size: 2
+        offset: 28
+        nullable: false
+        charset: utf-8
+        description: "Middle initial"
+
+      - name: c_last
+        type: char
+        size: 16
+        offset: 30
+        nullable: false
+        charset: utf-8
+        description: "Last name"
+
+      - name: c_street_1
+        type: char
+        size: 20
+        offset: 46
+        nullable: false
+        charset: utf-8
+        description: "Street address line 1"
+
+      - name: c_street_2
+        type: char
+        size: 20
+        offset: 66
+        nullable: false
+        charset: utf-8
+        description: "Street address line 2"
+
+      - name: c_city
+        type: char
+        size: 20
+        offset: 86
+        nullable: false
+        charset: utf-8
+        description: "City"
+
+      - name: c_state
+        type: char
+        size: 2
+        offset: 106
+        nullable: false
+        charset: utf-8
+        description: "State code"
+
+      - name: c_zip
+        type: char
+        size: 9
+        offset: 108
+        nullable: false
+        charset: utf-8
+        description: "ZIP code"
+
+      - name: c_phone
+        type: char
+        size: 16
+        offset: 117
+        nullable: false
+        charset: utf-8
+        description: "Phone number"
+
+      - name: c_since
+        type: date
+        size: 4
+        offset: 133
+        nullable: false
+        description: "Since date"
+
+      - name: c_credit
+        type: char
+        size: 2
+        offset: 137
+        nullable: false
+        charset: utf-8
+        description: "Credit rating"
+
+      - name: c_credit_lim
+        type: float32
+        size: 4
+        offset: 139
+        nullable: false
+        description: "Credit limit"
+
+      - name: c_discount
+        type: float32
+        size: 4
+        offset: 143
+        nullable: false
+        description: "Discount rate"
+
+      - name: c_balance
+        type: float32
+        size: 4
+        offset: 147
+        nullable: false
+        description: "Account balance"
+
+      - name: c_ytd_payment
+        type: float32
+        size: 4
+        offset: 151
+        nullable: false
+        description: "Year-to-date payment"
+
+      - name: c_payment_cnt
+        type: int32
+        size: 4
+        offset: 155
+        nullable: false
+        description: "Payment count"
+
+      - name: c_delivery_cnt
+        type: int32
+        size: 4
+        offset: 159
+        nullable: false
+        description: "Delivery count"
+
+      - name: c_data
+        type: char
+        size: 500
+        offset: 163
+        nullable: true
+        charset: utf-8
+        description: "Customer data"
+
+      - name: c_n_nationkey
+        type: int32
+        size: 4
+        offset: 663
+        nullable: true
+        description: "Nation key"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 667
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  history:
+    table_name: history
+    record_size: 545
+    primary_key:
+      - h_c_id
+      - h_c_d_id
+      - h_c_w_id
+      - h_d_id
+      - h_w_id
+      - h_date
+    fields:
+      - name: h_c_id
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Customer ID"
+
+      - name: h_c_d_id
+        type: int32
+        size: 4
+        offset: 4
+        nullable: false
+        description: "Customer District ID"
+
+      - name: h_c_w_id
+        type: int32
+        size: 4
+        offset: 8
+        nullable: false
+        description: "Customer Warehouse ID"
+
+      - name: h_d_id
+        type: int32
+        size: 4
+        offset: 12
+        nullable: false
+        description: "District ID"
+
+      - name: h_w_id
+        type: int32
+        size: 4
+        offset: 16
+        nullable: false
+        description: "Warehouse ID"
+
+      - name: h_date
+        type: timestamp
+        size: 8
+        offset: 20
+        precision: 3
+        nullable: false
+        description: "Transaction date"
+
+      - name: h_amount
+        type: float32
+        size: 4
+        offset: 28
+        nullable: false
+        description: "Transaction amount"
+
+      - name: h_data
+        type: char
+        size: 500
+        offset: 32
+        nullable: true
+        charset: utf-8
+        description: "History data"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 532
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  neworder:
+    table_name: neworder
+    record_size: 20
+    primary_key:
+      - no_w_id
+      - no_d_id
+      - no_o_id
+    fields:
+      - name: no_o_id
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Order ID"
+
+      - name: no_d_id
+        type: int32
+        size: 4
+        offset: 4
+        nullable: false
+        description: "District ID"
+
+      - name: no_w_id
+        type: int32
+        size: 4
+        offset: 8
+        nullable: false
+        description: "Warehouse ID"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 12
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  order:
+    table_name: order
+    record_size: 49
+    primary_key:
+      - o_w_id
+      - o_d_id
+      - o_id
+    fields:
+      - name: o_id
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Order ID"
+
+      - name: o_d_id
+        type: int32
+        size: 4
+        offset: 4
+        nullable: false
+        description: "District ID"
+
+      - name: o_w_id
+        type: int32
+        size: 4
+        offset: 8
+        nullable: false
+        description: "Warehouse ID"
+
+      - name: o_c_id
+        type: int32
+        size: 4
+        offset: 12
+        nullable: false
+        description: "Customer ID"
+
+      - name: o_entry_d
+        type: date
+        size: 4
+        offset: 16
+        nullable: false
+        description: "Order entry date"
+
+      - name: o_carrier_id
+        type: int32
+        size: 4
+        offset: 20
+        nullable: true
+        description: "Carrier ID"
+
+      - name: o_ol_cnt
+        type: int32
+        size: 4
+        offset: 24
+        nullable: false
+        description: "Order line count"
+
+      - name: o_all_local
+        type: int32
+        size: 4
+        offset: 28
+        nullable: false
+        description: "All local flag"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 32
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  orderline:
+    table_name: orderline
+    record_size: 89
+    primary_key:
+      - ol_w_id
+      - ol_d_id
+      - ol_o_id
+      - ol_number
+    fields:
+      - name: ol_o_id
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Order ID"
+
+      - name: ol_d_id
+        type: int32
+        size: 4
+        offset: 4
+        nullable: false
+        description: "District ID"
+
+      - name: ol_w_id
+        type: int32
+        size: 4
+        offset: 8
+        nullable: false
+        description: "Warehouse ID"
+
+      - name: ol_number
+        type: int32
+        size: 4
+        offset: 12
+        nullable: false
+        description: "Order line number"
+
+      - name: ol_i_id
+        type: int32
+        size: 4
+        offset: 16
+        nullable: false
+        description: "Item ID"
+
+      - name: ol_supply_w_id
+        type: int32
+        size: 4
+        offset: 20
+        nullable: false
+        description: "Supply warehouse ID"
+
+      - name: ol_delivery_d
+        type: date
+        size: 4
+        offset: 24
+        nullable: true
+        description: "Delivery date"
+
+      - name: ol_quantity
+        type: int32
+        size: 4
+        offset: 28
+        nullable: false
+        description: "Quantity"
+
+      - name: ol_amount
+        type: float32
+        size: 4
+        offset: 32
+        nullable: false
+        description: "Order line amount"
+
+      - name: ol_dist_info
+        type: char
+        size: 32
+        offset: 36
+        nullable: true
+        charset: utf-8
+        description: "Distribution information"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 68
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  item:
+    table_name: item
+    record_size: 113
+    primary_key: i_id
+    fields:
+      - name: i_id
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Item ID"
+
+      - name: i_im_id
+        type: int32
+        size: 4
+        offset: 4
+        nullable: false
+        description: "Image ID"
+
+      - name: i_name
+        type: char
+        size: 32
+        offset: 8
+        nullable: false
+        charset: utf-8
+        description: "Item name"
+
+      - name: i_price
+        type: float32
+        size: 4
+        offset: 40
+        nullable: false
+        description: "Item price"
+
+      - name: i_data
+        type: char
+        size: 50
+        offset: 44
+        nullable: true
+        charset: utf-8
+        description: "Item data"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 94
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  stock:
+    table_name: stock
+    record_size: 297
+    primary_key:
+      - s_w_id
+      - s_i_id
+    fields:
+      - name: s_i_id
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Item ID"
+
+      - name: s_w_id
+        type: int32
+        size: 4
+        offset: 4
+        nullable: false
+        description: "Warehouse ID"
+
+      - name: s_quantity
+        type: int32
+        size: 4
+        offset: 8
+        nullable: false
+        description: "Quantity on hand"
+
+      - name: s_dist_01
+        type: char
+        size: 32
+        offset: 12
+        nullable: true
+        charset: utf-8
+        description: "District 01 info"
+
+      - name: s_dist_02
+        type: char
+        size: 32
+        offset: 44
+        nullable: true
+        charset: utf-8
+        description: "District 02 info"
+
+      - name: s_dist_03
+        type: char
+        size: 32
+        offset: 76
+        nullable: true
+        charset: utf-8
+        description: "District 03 info"
+
+      - name: s_dist_04
+        type: char
+        size: 32
+        offset: 108
+        nullable: true
+        charset: utf-8
+        description: "District 04 info"
+
+      - name: s_dist_05
+        type: char
+        size: 32
+        offset: 140
+        nullable: true
+        charset: utf-8
+        description: "District 05 info"
+
+      - name: s_dist_06
+        type: char
+        size: 32
+        offset: 172
+        nullable: true
+        charset: utf-8
+        description: "District 06 info"
+
+      - name: s_dist_07
+        type: char
+        size: 32
+        offset: 204
+        nullable: true
+        charset: utf-8
+        description: "District 07 info"
+
+      - name: s_dist_08
+        type: char
+        size: 32
+        offset: 236
+        nullable: true
+        charset: utf-8
+        description: "District 08 info"
+
+      - name: s_dist_09
+        type: char
+        size: 32
+        offset: 268
+        nullable: true
+        charset: utf-8
+        description: "District 09 info"
+
+      - name: s_dist_10
+        type: char
+        size: 32
+        offset: 300
+        nullable: true
+        charset: utf-8
+        description: "District 10 info"
+
+      - name: s_ytd
+        type: int32
+        size: 4
+        offset: 332
+        nullable: false
+        description: "Year-to-date sales"
+
+      - name: s_order_cnt
+        type: int32
+        size: 4
+        offset: 336
+        nullable: false
+        description: "Order count"
+
+      - name: s_remote_cnt
+        type: int32
+        size: 4
+        offset: 340
+        nullable: false
+        description: "Remote order count"
+
+      - name: s_data
+        type: char
+        size: 50
+        offset: 344
+        nullable: true
+        charset: utf-8
+        description: "Stock data"
+
+      - name: s_su_suppkey
+        type: int32
+        size: 4
+        offset: 394
+        nullable: true
+        description: "Supplier key"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 398
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  nation:
+    table_name: nation
+    record_size: 189
+    primary_key: n_nationkey
+    fields:
+      - name: n_nationkey
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Nation key"
+
+      - name: n_name
+        type: char
+        size: 25
+        offset: 4
+        nullable: false
+        charset: utf-8
+        description: "Nation name"
+
+      - name: n_regionkey
+        type: int32
+        size: 4
+        offset: 29
+        nullable: false
+        description: "Region key"
+
+      - name: n_comment
+        type: char
+        size: 152
+        offset: 33
+        nullable: true
+        charset: utf-8
+        description: "Nation comment"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 185
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  supplier:
+    table_name: supplier
+    record_size: 207
+    primary_key: su_suppkey
+    fields:
+      - name: su_suppkey
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Supplier key"
+
+      - name: su_name
+        type: char
+        size: 25
+        offset: 4
+        nullable: false
+        charset: utf-8
+        description: "Supplier name"
+
+      - name: su_address
+        type: char
+        size: 40
+        offset: 29
+        nullable: false
+        charset: utf-8
+        description: "Supplier address"
+
+      - name: su_nationkey
+        type: int32
+        size: 4
+        offset: 69
+        nullable: false
+        description: "Nation key"
+
+      - name: su_phone
+        type: char
+        size: 15
+        offset: 73
+        nullable: false
+        charset: utf-8
+        description: "Supplier phone"
+
+      - name: su_acctbal
+        type: float32
+        size: 4
+        offset: 88
+        nullable: false
+        description: "Account balance"
+
+      - name: su_comment
+        type: char
+        size: 101
+        offset: 92
+        nullable: true
+        charset: utf-8
+        description: "Supplier comment"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 193
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"
+
+  region:
+    table_name: region
+    record_size: 219
+    primary_key: r_regionkey
+    fields:
+      - name: r_regionkey
+        type: int32
+        size: 4
+        offset: 0
+        nullable: false
+        description: "Region key"
+
+      - name: r_name
+        type: char
+        size: 55
+        offset: 4
+        nullable: false
+        charset: utf-8
+        description: "Region name"
+
+      - name: r_comment
+        type: char
+        size: 152
+        offset: 59
+        nullable: true
+        charset: utf-8
+        description: "Region comment"
+
+      - name: freshness_ts
+        type: timestamp
+        size: 8
+        offset: 211
+        precision: 3
+        nullable: true
+        description: "Freshness timestamp"

@@ -16,6 +16,8 @@ class RpcConfig(BaseModel):
     url: str = Field(..., description="RPC endpoint URL (for HTTP-JSON)")
     timeout: int = Field(default=30, description="Request timeout in seconds")
     max_retries: int = Field(default=3, description="Maximum retry attempts")
+    batch_size: int = Field(default=100, description="Batch size for RPC polling (records per batch)")
+    batch_timeout: int = Field(default=5, description="Max seconds to wait before flushing batch to storage")
     # gRPC specific fields
     grpc_host: Optional[str] = Field(default=None, description="gRPC server host")
     grpc_port: int = Field(default=6688, description="gRPC server port")
@@ -44,7 +46,6 @@ class Config(BaseModel):
     rpc: RpcConfig
     lancedb: LanceDBConfig
     parser: ParserConfig
-    batch_size: int = Field(default=100, description="Batch size for processing")
     log_level: str = Field(default="INFO", description="Logging level")
 
     class Config:
