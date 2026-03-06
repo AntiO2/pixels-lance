@@ -29,6 +29,9 @@ lancedb:
   # 留空 {} 表示使用本地存储，或使用环境变量中的 AWS 凭证
   # storage_options: {}
   
+  # HTTP(S) 代理配置（可选）
+  # proxy: ${HTTP_PROXY:-}
+  
   # ========== S3 配置示例 ==========
   # 方式 1: AWS S3 (使用环境变量)
   db_path: s3://home-zinuo/lancedb
@@ -36,6 +39,7 @@ lancedb:
     region: ${AWS_REGION}
     access_key_id: ${AWS_ACCESS_KEY_ID}
     secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+  proxy: ${HTTP_PROXY}
   
   # 方式 2: MinIO (S3-compatible)
   # db_path: s3://my-bucket/lancedb

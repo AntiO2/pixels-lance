@@ -29,6 +29,8 @@ class LanceDBConfig(BaseModel):
     mode: str = Field(default="overwrite", description="Write mode: overwrite or append")
     # Storage options for object stores (S3, GCS, Azure)
     storage_options: Optional[Dict[str, Any]] = Field(default=None, description="Storage options for object stores")
+    # HTTP(S) proxy settings
+    proxy: Optional[str] = Field(default=None, description="HTTP(S) proxy URL (e.g., http://proxy.example.com:8080)")
 
 
 class ParserConfig(BaseModel):

@@ -58,6 +58,10 @@ class LanceDBStore:
             self.storage_options = {k: v for k, v in self.config.storage_options.items() if v is not None and v != ''}
         else:
             self.storage_options = {}
+        
+        # Add proxy settings if configured
+        if hasattr(self.config, 'proxy') and self.config.proxy:
+            self.storage_options['proxy_options'] = self.config.proxy
 
         logger.info(
             "LanceStore initialized",
