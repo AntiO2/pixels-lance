@@ -14,12 +14,43 @@ rpc:
   grpc_port: 9091
 
 lancedb:
-  # Path to LanceDB database directory
-  db_path: ./lancedb
-  # Table name for storing data
+  # Base path for Lance datasets
+  # 本地存储: ./lancedb
+  # AWS S3: s3://my-bucket/lancedb
+  # MinIO: s3://my-bucket/lancedb (需配置 endpoint)
+  # db_path: ./lancedb
+  # Default table name (CLI 会通过 --table 参数覆盖)
   table_name: pixel_data
+  
   # Write mode: 'overwrite' or 'append'
   mode: append
+  
+  # Storage options for object stores (S3, GCS, Azure)
+  # 留空 {} 表示使用本地存储，或使用环境变量中的 AWS 凭证
+  # storage_options: {}
+  
+  # ========== S3 配置示例 ==========
+  # 方式 1: AWS S3 (使用环境变量)
+  db_path: s3://home-zinuo/lancedb
+  storage_options:
+    region: ${AWS_REGION}
+    access_key_id: ${AWS_ACCESS_KEY_ID}
+    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+  
+  # 方式 2: MinIO (S3-compatible)
+  # db_path: s3://my-bucket/lancedb
+  # storage_options:
+  #   region: us-east-1
+  #   endpoint: http://localhost:9000
+  #   access_key_id: ${AWS_ACCESS_KEY_ID}
+  #   secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+  
+  # 方式 3: 直接写凭证 (不推荐，仅用于测试)
+  # db_path: s3://my-bucket/lancedb
+  # storage_options:
+  #   region: us-east-1
+  #   access_key_id: AKIAIOSFODNN7EXAMPLE
+  #   secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 
 parser:
   # Path to schema definition file

@@ -24,9 +24,11 @@ class RpcConfig(BaseModel):
 
 class LanceDBConfig(BaseModel):
     """LanceDB configuration"""
-    db_path: str = Field(default="./lancedb", description="Path to LanceDB database")
+    db_path: str = Field(default="./lancedb", description="Path to LanceDB database (local path or s3://bucket/path)")
     table_name: str = Field(default="data", description="Table name in LanceDB")
     mode: str = Field(default="overwrite", description="Write mode: overwrite or append")
+    # Storage options for object stores (S3, GCS, Azure)
+    storage_options: Optional[Dict[str, Any]] = Field(default=None, description="Storage options for object stores")
 
 
 class ParserConfig(BaseModel):

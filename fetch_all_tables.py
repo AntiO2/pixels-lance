@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Parallel fetch script for all HyBench tables using ThreadPoolExecutor.
-Usage: python3 fetch_all_tables.py [--output-mode print|store] [--bucket-id 0] [--workers 4]
+Usage: python3 fetch_all_tables.py [--output-mode print|store] [--bucket-num 4] [--workers 8]
 """
 
 import argparse
@@ -25,10 +25,10 @@ TABLES = [
     "loantrans"
 ]
 
-def fetch_table(table_name: str, schema: str, output_mode: str, bucket_id: int, project_root: Path) -> Tuple[str, bool, str]:
+def fetch_table(table_name: str, schema: str, output_mode: str, bucket_id: int, project_root: Path) -> Tuple[str, int, bool, str]:
     """
-    Fetch a single table using the CLI.
-    Returns: (table_name, success, message)
+    Fetch a single table for a specific bucket using the CLI.
+    Returns: (table_name, bucket_id, success, message)
     """
     try:
         cmd = [
@@ -55,14 +55,14 @@ def fetch_table(table_name: str, schema: str, output_mode: str, bucket_id: int, 
                 if "Successfully stored" in line or "records" in line:
                     count_msg = f" ({line.strip()})"
                     break
-            return (table_name, True, f"Success{count_msg}")
+            return (table_name, bucket_id, True, f"Success{count_msg}")
         else:
             error_msg = result.stderr.split('\n')[-2] if result.stderr else "Unknown error"
-            return (table_name, False, f"Failed: {error_msg[:50]}")
+            return (table_name, bucket_id, False, f"Failed: {error_msg[:50]}")
     except subprocess.TimeoutExpired:
-        return (table_name, False, "Timeout (>5min)")
+        return (table_name, bucket_id, False, "Timeout (>5min)")
     except Exception as e:
-        return (table_name, False, str(e)[:50])
+        return (table_name, bucket_id, False, str(e)[:50])
 
 def main():
     parser = argparse.ArgumentParser(
@@ -70,10 +70,10 @@ def main():
     )
     parser.add_argument("--output-mode", choices=["print", "store"], default="store",
                        help="Output mode (default: store)")
-    parser.add_argument("--bucket-id", type=int, default=0,
-                       help="Bucket ID (default: 0)")
-    parser.add_argument("--workers", type=int, default=4,
-                       help="Number of parallel workers (default: 4)")
+    parser.add_argument("--bucket-num", type=int, default=4,
+                       help="Number of buckets to fetch (default: 4)")
+    parser.add_argument("--workers", type=int, default=8,
+                       help="Number of parallel workers (default: 8)")
     parser.add_argument("--schema", default="pixels_bench",
                        help="Schema name (default: pixels_bench)")
     parser.add_argument("--tables", nargs="+", default=TABLES,
@@ -84,12 +84,16 @@ def main():
     # Find project root (where config/ exists)
     project_root = Path(__file__).parent
     
+    # Generate all (table, bucket) combinations
+    tasks = [(table, bucket_id) for table in args.tables for bucket_id in range(args.bucket_num)]
+    
     print("=" * 70)
     print(f"Parallel HyBench Table Fetch")
     print(f"Schema: {args.schema}")
     print(f"Output Mode: {args.output_mode}")
-    print(f"Bucket ID: {args.bucket_id}")
+    print(f"Buckets: {args.bucket_num} (0-{args.bucket_num-1})")
     print(f"Tables: {len(args.tables)}")
+    print(f"Total Tasks: {len(tasks)} (tables × buckets)")
     print(f"Max Workers: {args.workers}")
     print(f"Project Root: {project_root}")
     print("=" * 70)
@@ -102,15 +106,16 @@ def main():
     # Use ThreadPoolExecutor for parallel fetching
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
-            executor.submit(fetch_table, table, args.schema, args.output_mode, args.bucket_id, project_root): table 
-            for table in args.tables
+            executor.submit(fetch_table, table, args.schema, args.output_mode, bucket_id, project_root): (table, bucket_id)
+            for table, bucket_id in tasks
         }
         
         for future in as_completed(futures):
-            table_name, success, message = future.result()
+            table_name, bucket_id, success, message = future.result()
             status = "✓" if success else "✗"
-            results.append((table_name, success, message))
-            print(f"[{table_name:<20}] {status} {message}")
+            task_label = f"{table_name}[B{bucket_id}]"
+            results.append((table_name, bucket_id, success, message))
+            print(f"[{task_label:<25}] {status} {message}")
             
             if success:
                 successful += 1
@@ -122,14 +127,14 @@ def main():
     print("=" * 70)
     print(f"Results Summary")
     print(f"Total Time: {elapsed:.1f}s")
-    print(f"Successful: {successful}/{len(args.tables)}")
-    print(f"Failed: {failed}/{len(args.tables)}")
+    print(f"Successful: {successful}/{len(tasks)}")
+    print(f"Failed: {failed}/{len(tasks)}")
     
     if failed > 0:
-        print("\nFailed Tables:")
-        for table_name, success, message in results:
+        print("\nFailed Tasks:")
+        for table_name, bucket_id, success, message in results:
             if not success:
-                print(f"  - {table_name}: {message}")
+                print(f"  - {table_name}[B{bucket_id}]: {message}")
     
     print("=" * 70)
     
