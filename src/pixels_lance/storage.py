@@ -348,6 +348,90 @@ class LanceDBStore:
                     continue
                 raise
 
+    def add(
+        self,
+        records: Union[Dict[str, Any], List[Dict[str, Any]]],
+        table_name: Optional[str] = None,
+        schema: Optional[Any] = None,
+    ) -> None:
+        """
+        Add records to Lance dataset directly (append semantics, no merge/upsert).
+
+        Args:
+            records: record or list of records
+            table_name: table name to operate on
+            schema: Optional PyArrow schema to enforce column types
+        """
+        table_name = table_name or self.config.table_name
+        dataset_path = self._get_dataset_path(table_name)
+
+        if isinstance(records, dict):
+            records = [records]
+
+        if not records:
+            return
+
+        if schema is not None:
+            pa_table = pa.Table.from_pylist(records, schema=schema)
+        else:
+            pa_table = pa.Table.from_pylist(records)
+
+        # Create dataset if not exists, append otherwise
+        dataset_exists = False
+        try:
+            if self.storage_options:
+                lance.dataset(dataset_path, storage_options=self.storage_options)
+            else:
+                lance.dataset(dataset_path)
+            dataset_exists = True
+        except Exception:
+            pass
+
+        if not dataset_exists:
+            if self.storage_options:
+                lance.write_dataset(pa_table, dataset_path, storage_options=self.storage_options)
+            else:
+                lance.write_dataset(pa_table, dataset_path)
+            logger.info(
+                "Add completed (created new dataset)",
+                extra={"table_name": table_name, "records": len(records)},
+            )
+            return
+
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                if self.storage_options:
+                    lance.write_dataset(
+                        pa_table,
+                        dataset_path,
+                        mode="append",
+                        storage_options=self.storage_options,
+                    )
+                else:
+                    lance.write_dataset(pa_table, dataset_path, mode="append")
+
+                logger.info(
+                    "Add completed",
+                    extra={"table_name": table_name, "records": len(records), "attempt": attempt},
+                )
+                return
+            except Exception as e:
+                if attempt < max_retries and self._is_retryable_write_error(e):
+                    sleep_seconds = 0.2 * attempt
+                    logger.warning(
+                        "Add failed with retryable error, retrying",
+                        extra={
+                            "table_name": table_name,
+                            "attempt": attempt,
+                            "sleep_seconds": sleep_seconds,
+                            "error": str(e),
+                        },
+                    )
+                    time.sleep(sleep_seconds)
+                    continue
+                raise
+
     def delete(
         self,
         records: Union[Dict[str, Any], List[Dict[str, Any]]],

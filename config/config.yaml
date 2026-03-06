@@ -65,6 +65,8 @@ parser:
   schema_file: config/schema_chbenchmark.yaml
   # Data encoding
   encoding: utf-8
+  # Whether table/field names are case-sensitive (false: convert to lowercase)
+  case_sensitive: false
 
 # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 log_level: INFO

@@ -39,6 +39,7 @@ class ParserConfig(BaseModel):
     """Data parser configuration"""
     schema_file: str = Field(..., description="Path to schema definition file")
     encoding: str = Field(default="utf-8", description="Data encoding")
+    case_sensitive: bool = Field(default=False, description="Whether table/field names are case-sensitive (False: convert to lowercase)")
 
 
 class Config(BaseModel):

@@ -12,6 +12,7 @@ Automatically detects data format and imports into LanceDB with proper schema en
 
 import sys
 import csv
+import gc
 from pathlib import Path
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,6 +20,10 @@ import logging
 from enum import Enum
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
+import warnings
+
+# Suppress Lance fork-safe warning (we use spawn context)
+warnings.filterwarnings("ignore", message="lance is not fork-safe")
 
 # Setup logging
 logging.basicConfig(
@@ -32,46 +37,97 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from pixels_lance.parser import DataParser, Schema, SchemaCollection
 from pixels_lance.storage import LanceDBStore
-from pixels_lance.config import ConfigManager
+from pixels_lance.config import ConfigManager, LanceDBConfig
 
 
 # Module-level functions for multiprocessing (must be pickleable)
-def _parse_csv_file_worker(file_path: str, schema_dict: Dict, delimiter: str) -> List[Dict[str, Any]]:
+def _stream_parse_and_add_worker(
+    file_paths: List[str],
+    schema_dict: Dict[str, Any],
+    delimiter: str,
+    table_name: str,
+    lancedb_config_dict: Dict[str, Any],
+    batch_limit: int,
+    write_lock: Optional[Any] = None,
+) -> int:
     """
-    Worker function for parsing CSV files in a separate process.
-    
-    Args:
-        file_path: Path to CSV file
-        schema_dict: Schema as dict (for pickling)
-        delimiter: CSV delimiter
-    
+    Worker: read a list of files and add to Lance in streaming batches.
+
     Returns:
-        List of parsed records
+        Number of records successfully submitted for add.
     """
-    # Reconstruct schema from dict
+    # 输出worker初始化信息
+    logger.info(
+        f"Worker initialized: {len(file_paths)} files to process for table '{table_name}'"
+    )
+    if file_paths:
+        # 显示前3个文件名
+        files_to_show = file_paths[:3]
+        for i, fpath in enumerate(files_to_show, 1):
+            logger.info(f"  File {i}: {Path(fpath).name}")
+        if len(file_paths) > 3:
+            logger.info(f"  ... and {len(file_paths) - 3} more files")
+
     schema = Schema.from_dict(schema_dict)
-    
-    records = []
+    schema_arrow = schema.to_pyarrow_schema()
+
+    store = LanceDBStore(config=LanceDBConfig(**lancedb_config_dict))
+
+    total = 0
+    batch: List[Dict[str, Any]] = []
+
+    def flush_batch() -> int:
+        nonlocal batch
+        if not batch:
+            return 0
+
+        try:
+            if write_lock is not None:
+                with write_lock:
+                    store.add(
+                        records=batch,
+                        table_name=table_name,
+                        schema=schema_arrow,
+                    )
+            else:
+                store.add(
+                    records=batch,
+                    table_name=table_name,
+                    schema=schema_arrow,
+                )
+
+            flushed = len(batch)
+        finally:
+            # 显式清理：创建新的空列表，让旧列表被垃圾回收
+            batch = []
+            # 触发垃圾回收以立即释放内存（避免内存持续增长）
+            gc.collect()
+        
+        return flushed
+
     try:
-        csv_file = Path(file_path)
-        with open(csv_file, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter=delimiter)
-            for row_num, row in enumerate(reader, 1):
-                if len(row) < len(schema.fields):
-                    continue
-                
-                record = {}
-                for field_idx, field in enumerate(schema.fields):
-                    raw_value = row[field_idx] if field_idx < len(row) else ""
-                    parsed_value = _parse_field_value(raw_value, field.type)
-                    record[field.name] = parsed_value
-                
-                records.append(record)
+        for file_path in file_paths:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f, delimiter=delimiter)
+                for row in reader:
+                    if len(row) < len(schema.fields):
+                        continue
+
+                    record: Dict[str, Any] = {}
+                    for field_idx, field in enumerate(schema.fields):
+                        raw_value = row[field_idx] if field_idx < len(row) else ""
+                        record[field.name] = _parse_field_value(raw_value, field.type)
+
+                    batch.append(record)
+
+                    if len(batch) >= batch_limit:
+                        total += flush_batch()
+
+        total += flush_batch()
+        return total
     except Exception as e:
-        logger.warning(f"Error reading {file_path}: {e}")
-        return []
-    
-    return records
+        logger.error(f"Worker failed for files {file_paths[:2]}...: {e}")
+        return total
 
 
 def _parse_field_value(value: str, field_type: str) -> Any:
@@ -129,6 +185,27 @@ def _parse_field_value(value: str, field_type: str) -> Any:
         return None
 
 
+def _schema_to_dict(schema: Schema) -> Dict[str, Any]:
+    """Serialize Schema object for multiprocessing transport."""
+    return {
+        "table_name": schema.table_name,
+        "pk": list(schema.pk) if schema.pk else [],
+        "fields": [
+            {
+                "name": f.name,
+                "type": f.type,
+                "size": f.size,
+                "offset": f.offset,
+                "precision": f.precision,
+                "scale": f.scale,
+                "charset": f.charset,
+                "nullable": f.nullable,
+            }
+            for f in schema.fields
+        ],
+    }
+
+
 class DataFormat(Enum):
     """Supported data formats"""
     TBL = "tbl"                    # TPC-CH .tbl files (pipe-delimited)
@@ -140,16 +217,21 @@ class DataFormat(Enum):
 class DataImporter:
     """Universal importer for different data formats"""
     
-    def __init__(self, schema_path: str, data_source: str):
+    def __init__(self, schema_path: str, data_source: str, batch_limit: int = 1000000):
         """
         Initialize importer
         
         Args:
             schema_path: Path to schema YAML file
             data_source: Path to data directory or file
+            batch_limit: Max records per process batch before flushing to Lance
         """
         self.schema_path = schema_path
         self.data_source = Path(data_source)
+        
+        # Load config for case sensitivity option
+        cm = ConfigManager()
+        self.case_sensitive = cm.get().parser.case_sensitive
         
         # Load schema
         schema_obj = Schema.from_yaml(schema_path)
@@ -158,9 +240,17 @@ class DataImporter:
         else:
             self.schemas = {schema_obj.table_name: schema_obj}
         
+        # Convert schema keys to lowercase if case_sensitive is False
+        if not self.case_sensitive:
+            self.schemas = {k.lower(): v for k, v in self.schemas.items()}
+        
         # Initialize store
-        cm = ConfigManager()
         self.store = LanceDBStore(config=cm.get().lancedb)
+        if hasattr(cm.get().lancedb, "model_dump"):
+            self.lancedb_config_dict = cm.get().lancedb.model_dump()
+        else:
+            self.lancedb_config_dict = cm.get().lancedb.dict()
+        self.batch_limit = max(1, int(batch_limit))
         
         # Detect data format
         self.data_format = self._detect_format()
@@ -245,10 +335,25 @@ class DataImporter:
             return []
         
         return records
+
+    def _split_files_for_workers(self, files: List[Path], max_workers: int) -> List[List[str]]:
+        """Split files evenly by workers and return groups of file paths."""
+        if not files:
+            return []
+
+        worker_count = 1 if len(files) == 1 else min(max_workers, len(files))
+        groups: List[List[str]] = [[] for _ in range(worker_count)]
+
+        for idx, file_path in enumerate(files):
+            groups[idx % worker_count].append(str(file_path))
+
+        return [g for g in groups if g]
     
     def _import_tbl_format(self, table_name: str, max_workers: int = 4) -> int:
         """Import TBL format (pipe-delimited, with or without partitions)"""
-        schema = self.schemas.get(table_name.lower())
+        # Normalize table name based on case_sensitive setting
+        lookup_name = table_name if self.case_sensitive else table_name.lower()
+        schema = self.schemas.get(lookup_name)
         if not schema:
             logger.error(f"No schema for '{table_name}'")
             return 0
@@ -287,55 +392,60 @@ class DataImporter:
             
             logger.info(f"Importing {table_name} from {files_to_import[0].name} (pipe-delimited)...")
         
-        # Parse files (in parallel if multiple, sequential if single)
-        all_records = []
-        if len(files_to_import) == 1:
-            # Single file - parse directly
-            records = self._parse_csv_file(files_to_import[0], schema, delimiter="|")
-            all_records.extend(records)
-            logger.info(f"Parsed {len(records)} records")
-        else:
-            # Multiple files - parse in parallel with separate processes
-            logger.info(f"Starting {max_workers} worker processes...")
-            schema_dict = schema.to_dict() if hasattr(schema, 'to_dict') else {}
-            
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(_parse_csv_file_worker, str(f), schema_dict, "|"): f.name
-                    for f in files_to_import
-                }
-                
-                for i, future in enumerate(as_completed(futures), 1):
-                    file_name = futures[future]
-                    try:
-                        records = future.result()
-                        all_records.extend(records)
-                        logger.info(f"  Partition {i}/{len(files_to_import)}: {len(records)} records")
-                    except Exception as e:
-                        logger.error(f"Error processing {file_name}: {e}")
-        
-        if not all_records:
+        # Process by worker file-groups: each process receives a files list
+        schema_dict = _schema_to_dict(schema)
+        file_groups = self._split_files_for_workers(files_to_import, max_workers)
+        worker_count = len(file_groups)
+
+        logger.info(
+            f"Starting {worker_count} worker processes (batch_limit={self.batch_limit:,})..."
+        )
+
+        manager = multiprocessing.Manager()
+        write_lock = manager.Lock()
+        total_written = 0
+
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
+            futures = {
+                executor.submit(
+                    _stream_parse_and_add_worker,
+                    group,
+                    schema_dict,
+                    "|",
+                    table_name,
+                    self.lancedb_config_dict,
+                    self.batch_limit,
+                    write_lock,
+                ): i
+                for i, group in enumerate(file_groups, 1)
+            }
+
+            for future in as_completed(futures):
+                worker_id = futures[future]
+                try:
+                    written = future.result()
+                    total_written += written
+                    logger.info(f"  Worker {worker_id}/{worker_count}: {written} records added")
+                except Exception as e:
+                    logger.error(f"Error in worker {worker_id}: {e}")
+
+        manager.shutdown()
+
+        if total_written <= 0:
             logger.warning(f"No records found for table '{table_name}'")
             return 0
-        
-        logger.info(f"Total {len(all_records)} records, storing to LanceDB...")
-        
-        try:
-            self.store.upsert(
-                records=all_records,
-                table_name=table_name,
-                pk=schema.pk,
-                schema=schema.to_pyarrow_schema(),
-            )
-            logger.info(f"✓ Imported {len(all_records)} records for '{table_name}'")
-            return len(all_records)
-        except Exception as e:
-            logger.error(f"Error storing {table_name}: {e}")
-            return 0
+
+        logger.info(f"✓ Imported {total_written} records for '{table_name}'")
+        return total_written
     
     def _import_csv_format(self, table_name: str, max_workers: int = 4) -> int:
         """Import CSV format (comma-delimited, with or without partitions)"""
-        schema = self.schemas.get(table_name.lower())
+        # Normalize table name based on case_sensitive setting
+        lookup_name = table_name if self.case_sensitive else table_name.lower()
+        schema = self.schemas.get(lookup_name)
         if not schema:
             logger.error(f"No schema for '{table_name}'")
             return 0
@@ -374,51 +484,54 @@ class DataImporter:
             
             logger.info(f"Importing {table_name} from {files_to_import[0].name} (comma-delimited)...")
         
-        # Parse files (in parallel if multiple, sequential if single)
-        all_records = []
-        if len(files_to_import) == 1:
-            # Single file - parse directly
-            records = self._parse_csv_file(files_to_import[0], schema, delimiter=",")
-            all_records.extend(records)
-            logger.info(f"Parsed {len(records)} records")
-        else:
-            # Multiple files - parse in parallel with separate processes
-            logger.info(f"Starting {max_workers} worker processes...")
-            schema_dict = schema.to_dict() if hasattr(schema, 'to_dict') else {}
-            
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(_parse_csv_file_worker, str(f), schema_dict, ","): f.name
-                    for f in files_to_import
-                }
-                
-                for i, future in enumerate(as_completed(futures), 1):
-                    file_name = futures[future]
-                    try:
-                        records = future.result()
-                        all_records.extend(records)
-                        logger.info(f"  Partition {i}/{len(files_to_import)}: {len(records)} records")
-                    except Exception as e:
-                        logger.error(f"Error processing {file_name}: {e}")
-        
-        if not all_records:
+        # Process by worker file-groups: each process receives a files list
+        schema_dict = _schema_to_dict(schema)
+        file_groups = self._split_files_for_workers(files_to_import, max_workers)
+        worker_count = len(file_groups)
+
+        logger.info(
+            f"Starting {worker_count} worker processes (batch_limit={self.batch_limit:,})..."
+        )
+
+        manager = multiprocessing.Manager()
+        write_lock = manager.Lock()
+        total_written = 0
+
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
+            futures = {
+                executor.submit(
+                    _stream_parse_and_add_worker,
+                    group,
+                    schema_dict,
+                    ",",
+                    table_name,
+                    self.lancedb_config_dict,
+                    self.batch_limit,
+                    write_lock,
+                ): i
+                for i, group in enumerate(file_groups, 1)
+            }
+
+            for future in as_completed(futures):
+                worker_id = futures[future]
+                try:
+                    written = future.result()
+                    total_written += written
+                    logger.info(f"  Worker {worker_id}/{worker_count}: {written} records added")
+                except Exception as e:
+                    logger.error(f"Error in worker {worker_id}: {e}")
+
+        manager.shutdown()
+
+        if total_written <= 0:
             logger.warning(f"No records found for table '{table_name}'")
             return 0
-        
-        logger.info(f"Total {len(all_records)} records, storing to LanceDB...")
-        
-        try:
-            self.store.upsert(
-                records=all_records,
-                table_name=table_name,
-                pk=schema.pk,
-                schema=schema.to_pyarrow_schema(),
-            )
-            logger.info(f"✓ Imported {len(all_records)} records for '{table_name}'")
-            return len(all_records)
-        except Exception as e:
-            logger.error(f"Error storing {table_name}: {e}")
-            return 0
+
+        logger.info(f"✓ Imported {total_written} records for '{table_name}'")
+        return total_written
     
     def import_table(self, table_name: str, max_workers: int = 4) -> int:
         """Import a single table based on detected format"""
@@ -453,7 +566,8 @@ class DataImporter:
         
         for table_name in sorted(tables_to_import):
             # Skip if no schema
-            if table_name.lower() not in self.schemas:
+            lookup_name = table_name if self.case_sensitive else table_name.lower()
+            if lookup_name not in self.schemas:
                 logger.warning(f"No schema for '{table_name}', skipping")
                 continue
             
@@ -512,6 +626,13 @@ Examples:
         default=4,
         help="Number of parallel workers for partitioned data (default: 4)",
     )
+
+    parser.add_argument(
+        "--batch-limit",
+        type=int,
+        default=1000000,
+        help="Max records per worker batch before writing to Lance (default: 3000000)",
+    )
     
     args = parser.parse_args()
     
@@ -529,7 +650,11 @@ Examples:
     
     # Initialize importer
     try:
-        importer = DataImporter(str(schema_path), str(data_source))
+        importer = DataImporter(
+            str(schema_path),
+            str(data_source),
+            batch_limit=args.batch_limit,
+        )
     except Exception as e:
         logger.error(f"Failed to initialize importer: {e}")
         return 1

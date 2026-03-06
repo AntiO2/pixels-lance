@@ -187,9 +187,9 @@ tables:
     table_name: customer
     record_size: 675
     primary_key:
+      - c_id
       - c_w_id
       - c_d_id
-      - c_id
     fields:
       - name: c_id
         type: int32
