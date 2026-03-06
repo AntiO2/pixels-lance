@@ -94,12 +94,26 @@ class ConfigManager:
         elif isinstance(data, list):
             return [self._substitute_env_vars(item) for item in data]
         elif isinstance(data, str):
-            # Replace ${VAR_NAME} with environment variable value
+            # Replace ${VAR_NAME:-default} or ${VAR_NAME} with environment variable value
             import re
             def replace_var(match):
-                var_name = match.group(1)
-                return os.getenv(var_name, match.group(0))
-            return re.sub(r'\$\{(\w+)\}', replace_var, data)
+                var_with_default = match.group(1)
+                # Check if there's a default value specified (VAR_NAME:-default)
+                if ':-' in var_with_default:
+                    var_name, default_value = var_with_default.split(':-', 1)
+                    value = os.getenv(var_name.strip())
+                    # Return default if env var is not set or is empty
+                    if not value:
+                        return default_value if default_value else None
+                    return value
+                else:
+                    # No default value, just get the env var
+                    var_name = var_with_default
+                    return os.getenv(var_name, match.group(0))
+            
+            result = re.sub(r'\$\{([^}]+)\}', replace_var, data)
+            # If result is None or empty string, return None to indicate no value
+            return result if result else None
         return data
 
     def get(self) -> Config:

@@ -6,21 +6,43 @@ import lance
 import sys
 from pathlib import Path
 
+# ========== Configuration ==========
+# Set the table name to query
+QUERY_TABLE = "customer"
+# ===================================
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from pixels_lance.config import ConfigManager
+
+
 def test_query_customer():
     """Query customer table data"""
     
-    dataset_path = "./lancedb/customer.lance"
+    # Load configuration from config.yaml
+    config_manager = ConfigManager()
+    config = config_manager.config
     
-    # Check if dataset exists
-    if not Path(dataset_path).exists():
-        print(f"❌ Dataset not found at {dataset_path}")
-        print("Run the CLI first to create data:")
-        print("  PYTHONPATH=src python3 src/pixels_lance/cli.py --schema pixels_bench --table customer --bucket-id 2 --output store")
-        return False
+    # Construct dataset path from config
+    base_path = config.lancedb.db_path
+    dataset_path = f"{base_path}/{QUERY_TABLE}.lance"
+    
+    # Prepare storage options for S3
+    storage_options = None
+    if base_path.startswith('s3://'):
+        storage_options = config.lancedb.storage_options or {}
+        # Add proxy if configured
+        if config.lancedb.proxy:
+            storage_options['proxy_options'] = config.lancedb.proxy
+    
+    print(f"Querying table: {QUERY_TABLE}")
+    print(f"Dataset path: {dataset_path}")
+    if storage_options:
+        print(f"Storage options: {list(storage_options.keys())}")
+    print()
     
     try:
-        # Load dataset
-        dataset = lance.dataset(dataset_path)
+        # Load dataset (with S3 support)
+        dataset = lance.dataset(dataset_path, storage_options=storage_options)
         
         print("=" * 70)
         print("Dataset Information")
@@ -98,14 +120,23 @@ def test_query_customer():
 def test_filter_query():
     """Test filtering customer data"""
     
-    dataset_path = "./lancedb/customer.lance"
+    # Load configuration
+    config_manager = ConfigManager()
+    config = config_manager.config
     
-    if not Path(dataset_path).exists():
-        print(f"Dataset not found at {dataset_path}")
-        return False
+    # Construct dataset path
+    base_path = config.lancedb.db_path
+    dataset_path = f"{base_path}/{QUERY_TABLE}.lance"
+    
+    # Prepare storage options for S3
+    storage_options = None
+    if base_path.startswith('s3://'):
+        storage_options = config.lancedb.storage_options or {}
+        if config.lancedb.proxy:
+            storage_options['proxy_options'] = config.lancedb.proxy
     
     try:
-        dataset = lance.dataset(dataset_path)
+        dataset = lance.dataset(dataset_path, storage_options=storage_options)
         
         print("\n" + "=" * 70)
         print("Filtered Query Examples")

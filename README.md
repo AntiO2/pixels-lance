@@ -1,189 +1,202 @@
 # Pixels Lance
 
-从RPC拉取二进制数据，解析后存储到LanceDB的Python框架。支持HTTP-JSON RPC和Pixels PixelsPollingService（gRPC）。
+从 Pixels RPC 拉取二进制数据,解析并存储到 Lance 的框架
+
+**Pixels Lance** 是一个用于实时数据同步的 Python 工具，通过 gRPC 从 Pixels 拉取变更数据（CDC），解析复杂的二进制格式，并存储到 LanceDB 列式数据库中。支持本地存储和 AWS S3。
+
+---
+
+## 核心特性
+
+- **多协议支持** - 支持 gRPC (PixelsPollingService) 和 HTTP-JSON RPC
+- **智能存储** - 基于主键的 Upsert 操作,自动合并更新
+- **云原生** - 支持本地文件系统和 AWS S3/MinIO 对象存储
+- **丰富类型** - 支持 20+ 种数据类型(int/float/varchar/timestamp/decimal等)
+- **高性能** - 批量处理、可配置并发、自动重试
+- **易配置** - YAML 配置 + 环境变量,一键切换代理和存储
+
+---
 
 ## 快速开始
 
-### 安装
+### 1. 安装
 
 ```bash
-# 克隆项目
 git clone https://github.com/AntiO2/pixels-lance.git
 cd pixels-lance
 
-# 安装依赖
+# 安装依赖（推荐使用虚拟环境）
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-
-# 开发模式（包含测试工具和gRPC编译器）
-pip install -r requirements-dev.txt
 ```
 
-### 基本使用
+### 2. 配置
 
-#### CLI 命令行使用
+复制环境变量模板并填写：
 ```bash
-# 轮询 customer 表的所有 bucket 并存储到 LanceDB
+cp config/.env.example config/.env
+# 编辑 config/.env 填写 AWS 凭证（如使用 S3）
+```
+
+### 3. 运行
+
+```bash
+# 拉取 customer 表数据并存储到 LanceDB
 pixels-lance --schema tpch --table customer
 
-# 指定特定的 bucket IDs
-pixels-lance --schema tpch --table customer --bucket-id 0 --bucket-id 1
-
-# 仅解析数据并打印到屏幕（不存储到数据库）
-pixels-lance --schema tpch --table customer --output print
-
-# 或者使用简写方式
-pixels-lance --schema tpch --table customer --dry-run
-
-# 指定自定义配置文件和模式文件
-pixels-lance --config config/custom.yaml --schema-file config/schema_hybench.yaml --schema tpch --table customer
+# 查询已存储的数据
+python tests/test_query_customer.py
 ```
 
-#### Python API 使用
+---
 
-##### HTTP-JSON RPC
-```python
-from pixels_lance import RpcFetcher, DataParser, LanceDBStore
+## 文档导航
 
-fetcher = RpcFetcher(config_path="config/config.yaml")
-parser = DataParser(schema_path="config/schema_hybench.yaml", table_name="customer")
-store = LanceDBStore(config_path="config/config.yaml")
+| 文档 | 说明 |
+|------|------|
+| [安装指南](docs/INSTALL.md) | 详细安装步骤（自动/手动、多平台） |
+| [快速开始](docs/QUICKSTART.md) | 核心概念、数据类型、使用示例 |
+| [S3 存储配置](docs/S3_SETUP.md) | AWS S3 和 MinIO 配置教程 |
+| [存储机制](docs/STORAGE.md) | Upsert、主键、存储模式说明 |
+| [并行拉取](docs/PARALLEL_FETCH.md) | 多表并行拉取和性能优化 |
 
-# 拉取、解析、存储
-for data in fetcher.fetch_batch([...]):
-    parsed = parser.parse_batch(data)
-    store.upsert(parsed, table_name="customer", pk=["custID"])
+---
+
+## 使用示例
+
+### CLI 命令行
+
+```bash
+# 基础用法:拉取并存储(必须指定 bucket-id)
+pixels-lance --schema tpch --table customer --bucket-id 0
+
+# 指定多个 bucket IDs
+pixels-lance --schema tpch --table customer --bucket-id 0 --bucket-id 1 --bucket-id 2
+
+# 仅解析和打印（不存储）
+pixels-lance --schema tpch --table customer --bucket-id 0 --dry-run
 ```
 
-##### gRPC (PixelsPollingService)
+### Python API
+
 ```python
 from pixels_lance.grpc_fetcher import PixelsGrpcFetcher, RowRecordBinaryExtractor
 from pixels_lance.parser import DataParser
 from pixels_lance.storage import LanceDBStore
 
+# 1. 连接 gRPC 服务
 fetcher = PixelsGrpcFetcher(host="localhost", port=6688)
 fetcher.connect()
 
-# Poll events from Pixels
+# 2. 拉取数据
 row_records = fetcher.poll_events(schema_name="tpch", table_name="customer")
-
-# Extract binary and parse
 binary_data = RowRecordBinaryExtractor.extract_records_binary(row_records)
-parser = DataParser(schema_path="config/schema_hybench.yaml", table_name="customer")
-parsed = parser.parse_batch(binary_data)
 
-# Store with upsert
-store = LanceDBStore(db_path="./lancedb")
-store.upsert(parsed, table_name="customer", pk=["custID"])
+# 3. 解析二进制
+parser = DataParser(schema_path="config/schema_hybench.yaml", table_name="customer")
+parsed_data = parser.parse_batch(binary_data)
+
+# 4. 存储到 LanceDB（自动 upsert）
+store = LanceDBStore()
+store.upsert(parsed_data, table_name="customer", pk=["custID"])
 ```
 
-## 项目结构
+---
+
+## 项目架构
 
 ```
 pixels-lance/
-├── src/pixels_lance/          # 源代码
-│   ├── __init__.py
-│   ├── cli.py                 # 命令行接口
-│   ├── fetcher.py             # RPC数据拉取器 (HTTP-JSON & binary extraction)
-│   ├── grpc_fetcher.py        # gRPC客户端 (PixelsPollingService)
-│   ├── parser.py              # 二进制数据解析器
-│   ├── storage.py             # LanceDB存储器 (带merge_insert/upsert)
-│   ├── config.py              # 配置管理 (支持gRPC配置)
-│   ├── logger.py              # 日志配置
-│   └── proto/                 # 生成的gRPC代码
-│       ├── sink_pb2.py        # Protobuf消息定义
-│       ├── sink_pb2.pyi       # 类型存根
-│       └── sink_pb2_grpc.py   # gRPC服务代码
-├── proto/
-│   └── sink.proto             # Pixels PixelsPollingService 定义
-├── config/
-│   ├── config.yaml            # 主配置文件 (支持gRPC配置)
-│   ├── schema_hybench.yaml    # HyBench基准测试的多表模式
-│   └── .env.example           # 环境变量示例
-├── tests/                     # 测试目录
-├── examples.py                # HTTP-JSON RPC 示例
-├── examples_grpc.py           # gRPC 示例
-├── pyproject.toml             # 项目配置
-└── README.md                  # 本文件
+├── config/                    # 配置文件
+│   ├── config.yaml           # 主配置（RPC/LanceDB/代理）
+│   ├── schema_hybench.yaml   # 表结构定义（字段类型、偏移量、主键）
+│   └── .env                  # 环境变量（AWS 凭证等）
+├── src/pixels_lance/         # 核心代码
+│   ├── grpc_fetcher.py       # gRPC 客户端
+│   ├── parser.py             # 二进制解析器
+│   ├── storage.py            # LanceDB 存储（Upsert）
+│   └── proto/                # gRPC 协议定义
+├── docs/                     # 详细文档
+└── tests/                    # 测试和示例
 ```
 
-## 配置说明
+---
 
-### config/config.yaml
-主配置文件，包含RPC连接（HTTP-JSON或gRPC）、LanceDB设置等。
+## 核心配置
 
-**gRPC配置示例：**
+### 主配置文件 `config/config.yaml`
+
 ```yaml
 rpc:
-  use_grpc: true
+  use_grpc: true               # 使用 gRPC（默认）
   grpc_host: localhost
   grpc_port: 6688
-  timeout: 30
+
+lancedb:
+  db_path: s3://my-bucket/lancedb   # 本地: ./lancedb
+  mode: append                       # 或 overwrite
+  storage_options:                   # S3 配置
+    region: ${AWS_REGION}
+    access_key_id: ${AWS_ACCESS_KEY_ID}
+    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+  proxy: ${HTTP_PROXY:-}             # 可选代理
 ```
 
-### config/schema_hybench.yaml
-定义多个表的二进制数据结构，包括字段名、类型、偏移量和主键。
+### Schema 定义 `config/schema_hybench.yaml`
 
-支持的数据类型：
-- `int`, `bigint`, `varchar(N)`, `char(N)`
-- `real` (float32), `double` (float64)
-- `timestamp`, `date`
-- `boolean`
+定义每个表的二进制结构（字段名、类型、偏移量、主键）：
 
-### config/.env
-敏感信息（API密钥、gRPC主机等）应存储在.env文件中。
+```yaml
+customer:
+  fields:
+    - name: custID
+      type: int32
+      size: 4
+      offset: 0
+      nullable: false
+    - name: name
+      type: varchar
+      size: 15
+      offset: 8
+    # ... 更多字段
+  primary_key: [custID]
+  record_size: 114
+```
 
-## 开发指南
+**支持的类型**: int8/16/32/64, float32/64, varchar, timestamp, date, boolean, decimal 等
 
-### 运行测试
+**注意**: 使用 CLI 时必须通过 `--bucket-id` 参数指定至少一个 bucket ID。
+
+---
+
+## 开发和测试
 
 ```bash
-pytest tests/
+# 运行测试
 pytest tests/ -v --cov=src
-```
 
-### 重新生成gRPC代码
+# 代码格式化
+black src/ tests/
 
-```bash
-python3 -m grpc_tools.protoc -I proto --python_out=src/pixels_lance/proto --pyi_out=src/pixels_lance/proto --grpc_python_out=src/pixels_lance/proto proto/sink.proto
-```
-
-### 代码格式化
-
-```bash
-black src/ tests/ *.py
-flake8 src/ tests/
-```
-
-### 类型检查
-
-```bash
+# 类型检查
 mypy src/
+
+# 重新生成 gRPC 代码
+python -m grpc_tools.protoc -I proto \
+  --python_out=src/pixels_lance/proto \
+  --grpc_python_out=src/pixels_lance/proto \
+  proto/sink.proto
 ```
 
-## 主要模块
+---
 
-- **RpcFetcher**: 连接HTTP-JSON RPC节点，拉取二进制数据；支持gRPC二进制提取
-- **PixelsGrpcFetcher**: 连接Pixels PixelsPollingService (gRPC)，获取RowRecord消息
-- **RowRecordBinaryExtractor**: 从protobuf RowRecord消息中提取二进制数据
-- **DataParser**: 根据schema解析二进制数据，支持多种数据类型
-- **LanceDBStore**: 将解析的数据存储到LanceDB，支持merge_insert (upsert)
-- **ConfigManager**: 统一管理配置，支持环境变量替换
+## 贡献
 
-## gRPC支持
+欢迎提交 Issue 和 Pull Request！
 
-项目集成了 [Pixels PixelsPollingService](https://github.com/AntiO2/pixels/blob/master/proto/sink.proto) 的gRPC定义。
-
-**主要gRPC消息：**
-- `PollRequest`: 轮询请求 (schema_name, table_name, buckets)
-- `RowRecord`: 行记录 (before/after values, source info, operation type)
-- `OperationType`: INSERT, UPDATE, DELETE, SNAPSHOT
-
-使用示例见 `examples_grpc.py`。## 扩展指南
-
-1. **自定义解析器**: 继承 `DataParser` 类并实现自己的 `parse()` 方法
-2. **自定义数据源**: 继承 `RpcFetcher` 类并实现自己的 `fetch()` 方法
-3. **自定义存储后端**: 继承 `LanceDBStore` 类
+---
 
 ## License
 
-MIT
+MIT License - 详见 [LICENSE](LICENSE) 文件

@@ -39,7 +39,7 @@ lancedb:
     region: ${AWS_REGION}
     access_key_id: ${AWS_ACCESS_KEY_ID}
     secret_access_key: ${AWS_SECRET_ACCESS_KEY}
-  proxy: ${HTTP_PROXY}
+  proxy: ${HTTP_PROXY:-}
   
   # 方式 2: MinIO (S3-compatible)
   # db_path: s3://my-bucket/lancedb
