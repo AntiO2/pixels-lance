@@ -446,6 +446,35 @@ def fetch_table(table_name):
 
 **建议：** 不同表使用不同的表名（避免冲突）
 
+### 4. 背压控制（Backpressure Control）
+
+在使用 `pixels-lance` CLI 进行 CDC 数据持续拉取时，通过 `max_pending_records` 参数可防止内存溢出：
+
+**配置路径：** [config/config.yaml](config/config.yaml)
+
+```yaml
+rpc:
+  batch_size: 200000        # 每批次记录数
+  batch_timeout: 30         # 批次超时（秒）
+  max_pending_records: 500000  # 最大pending记录数（buffered + flushing）
+```
+
+**工作原理：**
+- 当 `(缓冲中的记录数 + 正在flush的记录数) >= max_pending_records` 时，暂停polling
+- Flush完成后自动恢复polling
+- 默认值：`batch_size × 2`（如未配置）
+
+**使用场景：**
+- Flush速度慢于Poll速度时
+- 网络带宽受限导致写入延迟
+- S3/LanceDB写入较慢
+
+**日志示例：**
+```
+Backpressure control: max_pending=500000 records
+Backpressure: pausing poll (buffered=250000, flushing=280000, max=500000)
+```
+
 ---
 
 ## 相关文档

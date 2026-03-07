@@ -24,7 +24,43 @@ import proto.sink_pb2 as sink_pb2
 logger = get_logger(__name__)
 
 
-def _flush_batch(insert_snapshot_batch, update_batch, delete_batch, parser, store, table_name, output_mode, logger):
+class BackpressureController:
+    """Control polling backpressure to prevent memory overflow"""
+    
+    def __init__(self, max_pending: int):
+        """
+        Args:
+            max_pending: Maximum pending records (buffered + flushing)
+        """
+        self.max_pending = max_pending
+        self.flushing_count = 0
+        self.lock = threading.Lock()
+    
+    def can_accept(self, buffered_count: int) -> bool:
+        """Check if can accept more records"""
+        with self.lock:
+            total_pending = self.flushing_count + buffered_count
+            return total_pending < self.max_pending
+    
+    def start_flush(self, count: int):
+        """Mark records as flushing"""
+        with self.lock:
+            self.flushing_count += count
+    
+    def finish_flush(self, count: int):
+        """Mark flush completed"""
+        with self.lock:
+            self.flushing_count -= count
+            if self.flushing_count < 0:
+                self.flushing_count = 0
+    
+    def get_status(self) -> dict:
+        """Get current status"""
+        with self.lock:
+            return {'flushing': self.flushing_count}
+
+
+def _flush_batch(insert_snapshot_batch, update_batch, delete_batch, parser, store, table_name, output_mode, logger, backpressure=None):
     """
     Flush accumulated batch records to storage in parallel.
     
@@ -37,100 +73,109 @@ def _flush_batch(insert_snapshot_batch, update_batch, delete_batch, parser, stor
         table_name: Target table name
         output_mode: "store" or "print"
         logger: Logger instance
+        backpressure: BackpressureController instance
     """
-    def process_insert_snapshot():
-        if not insert_snapshot_batch:
-            return
-        print(f"Flushing {len(insert_snapshot_batch)} INSERT/SNAPSHOT records")
-        
-        try:
-            # Parse binary data
-            parsed_records = parser.parse_batch(insert_snapshot_batch, op_type="INSERT")
-            print(f"Parsed {len(parsed_records)} records")
-
-            if output_mode == "store":
-                # Store in LanceDB with append add
-                print(f"Adding {len(parsed_records)} records to LanceDB table '{table_name}'...")
-                store.add(
-                    records=parsed_records,
-                    table_name=table_name,
-                    schema=parser.schema.to_pyarrow_schema(),
-                )
-                print(f"Successfully added {len(parsed_records)} records")
-            else:  # output_mode == "print"
-                print(f"Print mode: Displaying {len(parsed_records)} records")
-                for i, record in enumerate(parsed_records):
-                    field_values = [f"{key}={repr(value)}" for key, value in record.items()]
-                    print(f"Record {i+1}: {', '.join(field_values)}")
-        except Exception as e:
-            print(f"Error processing INSERT/SNAPSHOT batch: {e}")
-            logger.exception(f"Failed to process batch of {len(insert_snapshot_batch)} records")
-
-    def process_update():
-        if not update_batch:
-            return
-        print(f"Flushing {len(update_batch)} UPDATE records")
-
-        try:
-            parsed_records = parser.parse_batch(update_batch, op_type="UPDATE")
-            print(f"Parsed {len(parsed_records)} update records")
-
-            if output_mode == "store":
-                print(f"Upserting {len(parsed_records)} records to LanceDB table '{table_name}'...")
-                store.upsert(
-                    records=parsed_records,
-                    table_name=table_name,
-                    pk=parser.schema.pk,
-                    schema=parser.schema.to_pyarrow_schema(),
-                )
-                print(f"Successfully upserted {len(parsed_records)} records")
-            else:  # output_mode == "print"
-                print(f"Print mode: Displaying {len(parsed_records)} update records")
-                for i, record in enumerate(parsed_records):
-                    field_values = [f"{key}={repr(value)}" for key, value in record.items()]
-                    print(f"Update Record {i+1}: {', '.join(field_values)}")
-        except Exception as e:
-            print(f"Error processing UPDATE batch: {e}")
-            logger.exception(f"Failed to process update batch of {len(update_batch)} records")
-
-    def process_delete():
-        if not delete_batch:
-            return
-        print(f"Flushing {len(delete_batch)} DELETE records")
-        
-        try:
-            # Parse binary data for delete records
-            delete_parsed_records = parser.parse_batch(delete_batch, op_type="DELETE")
-            print(f"Parsed {len(delete_parsed_records)} delete records")
-
-            if output_mode == "store":
-                # Delete from LanceDB
-                print(f"Deleting {len(delete_parsed_records)} records from LanceDB table '{table_name}'...")
-                store.delete(
-                    records=delete_parsed_records,
-                    table_name=table_name,
-                    pk=parser.schema.pk,
-                )
-                print(f"Successfully deleted {len(delete_parsed_records)} records")
-            else:  # output_mode == "print"
-                print(f"Print mode: Would delete {len(delete_parsed_records)} records")
-                for i, record in enumerate(delete_parsed_records):
-                    field_types = [f"{key}={type(value).__name__}" for key, value in record.items()]
-                    print(f"Delete Record {i+1}: {', '.join(field_types)}")
-        except Exception as e:
-            print(f"Error processing DELETE batch: {e}")
-            logger.exception(f"Failed to process delete batch of {len(delete_batch)} records")
+    total_count = len(insert_snapshot_batch) + len(update_batch) + len(delete_batch)
+    if backpressure:
+        backpressure.start_flush(total_count)
     
-    # Process all operation types in parallel
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = []
-        futures.append(executor.submit(process_insert_snapshot))
-        futures.append(executor.submit(process_update))
-        futures.append(executor.submit(process_delete))
+    try:
+        def process_insert_snapshot():
+            if not insert_snapshot_batch:
+                return
+            print(f"Flushing {len(insert_snapshot_batch)} INSERT/SNAPSHOT records")
+            
+            try:
+                # Parse binary data
+                parsed_records = parser.parse_batch(insert_snapshot_batch, op_type="INSERT")
+                print(f"Parsed {len(parsed_records)} records")
+
+                if output_mode == "store":
+                    # Store in LanceDB with append add
+                    print(f"Adding {len(parsed_records)} records to LanceDB table '{table_name}'...")
+                    store.add(
+                        records=parsed_records,
+                        table_name=table_name,
+                        schema=parser.schema.to_pyarrow_schema(),
+                    )
+                    print(f"Successfully added {len(parsed_records)} records")
+                else:  # output_mode == "print"
+                    print(f"Print mode: Displaying {len(parsed_records)} records")
+                    for i, record in enumerate(parsed_records):
+                        field_values = [f"{key}={repr(value)}" for key, value in record.items()]
+                        print(f"Record {i+1}: {', '.join(field_values)}")
+            except Exception as e:
+                print(f"Error processing INSERT/SNAPSHOT batch: {e}")
+                logger.exception(f"Failed to process batch of {len(insert_snapshot_batch)} records")
         
-        # Wait for all operations to complete
-        for future in futures:
-            future.result()
+        def process_update():
+            if not update_batch:
+                return
+            print(f"Flushing {len(update_batch)} UPDATE records")
+
+            try:
+                parsed_records = parser.parse_batch(update_batch, op_type="UPDATE")
+                print(f"Parsed {len(parsed_records)} update records")
+
+                if output_mode == "store":
+                    print(f"Upserting {len(parsed_records)} records to LanceDB table '{table_name}'...")
+                    store.upsert(
+                        records=parsed_records,
+                        table_name=table_name,
+                        pk=parser.schema.pk,
+                        schema=parser.schema.to_pyarrow_schema(),
+                    )
+                    print(f"Successfully upserted {len(parsed_records)} records")
+                else:  # output_mode == "print"
+                    print(f"Print mode: Displaying {len(parsed_records)} update records")
+                    for i, record in enumerate(parsed_records):
+                        field_values = [f"{key}={repr(value)}" for key, value in record.items()]
+                        print(f"Update Record {i+1}: {', '.join(field_values)}")
+            except Exception as e:
+                print(f"Error processing UPDATE batch: {e}")
+                logger.exception(f"Failed to process update batch of {len(update_batch)} records")
+        
+        def process_delete():
+            if not delete_batch:
+                return
+            print(f"Flushing {len(delete_batch)} DELETE records")
+            
+            try:
+                # Parse binary data for delete records
+                delete_parsed_records = parser.parse_batch(delete_batch, op_type="DELETE")
+                print(f"Parsed {len(delete_parsed_records)} delete records")
+
+                if output_mode == "store":
+                    # Delete from LanceDB
+                    print(f"Deleting {len(delete_parsed_records)} records from LanceDB table '{table_name}'...")
+                    store.delete(
+                        records=delete_parsed_records,
+                        table_name=table_name,
+                        pk=parser.schema.pk,
+                    )
+                    print(f"Successfully deleted {len(delete_parsed_records)} records")
+                else:  # output_mode == "print"
+                    print(f"Print mode: Would delete {len(delete_parsed_records)} records")
+                    for i, record in enumerate(delete_parsed_records):
+                        field_types = [f"{key}={type(value).__name__}" for key, value in record.items()]
+                        print(f"Delete Record {i+1}: {', '.join(field_types)}")
+            except Exception as e:
+                print(f"Error processing DELETE batch: {e}")
+                logger.exception(f"Failed to process delete batch of {len(delete_batch)} records")
+        
+        # Process all operation types in parallel
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = []
+            futures.append(executor.submit(process_insert_snapshot))
+            futures.append(executor.submit(process_update))
+            futures.append(executor.submit(process_delete))
+            
+            # Wait for all operations to complete
+            for future in futures:
+                future.result()
+    finally:
+        if backpressure:
+            backpressure.finish_flush(total_count)
 
 
 def main() -> int:
@@ -255,6 +300,11 @@ def main() -> int:
         # Get batch parameters from config
         batch_size = config.rpc.batch_size
         batch_timeout = config.rpc.batch_timeout
+        max_pending = getattr(config.rpc, 'max_pending_records', batch_size * 2)
+        
+        # Initialize backpressure controller
+        backpressure = BackpressureController(max_pending)
+        print(f"Backpressure control: max_pending={max_pending} records")
         
         # Batch buffers for streaming processing
         insert_snapshot_batch = []
@@ -264,6 +314,14 @@ def main() -> int:
 
         try:
             while True:
+                # Check backpressure before polling
+                buffered_count = len(insert_snapshot_batch) + len(update_batch) + len(delete_batch)
+                if not backpressure.can_accept(buffered_count):
+                    status = backpressure.get_status()
+                    print(f"Backpressure: pausing poll (buffered={buffered_count}, flushing={status['flushing']}, max={max_pending})")
+                    time.sleep(1)
+                    continue
+                
                 row_records = grpc_fetcher.poll_events(
                     schema_name=args.schema,
                     table_name=args.table,
@@ -279,7 +337,7 @@ def main() -> int:
                             print(f"Batch timeout ({batch_timeout}s) reached, flushing batch...")
                             _flush_batch(
                                 insert_snapshot_batch, update_batch, delete_batch,
-                                parser, store, args.table, output_mode, logger
+                                parser, store, args.table, output_mode, logger, backpressure
                             )
                             insert_snapshot_batch.clear()
                             update_batch.clear()
@@ -315,7 +373,7 @@ def main() -> int:
                     print(f"Batch size ({batch_size}) reached ({total_batch_size} records), flushing...")
                     _flush_batch(
                         insert_snapshot_batch, update_batch, delete_batch,
-                        parser, store, args.table, output_mode, logger
+                        parser, store, args.table, output_mode, logger, backpressure
                     )
                     insert_snapshot_batch.clear()
                     update_batch.clear()

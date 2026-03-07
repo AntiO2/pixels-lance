@@ -9,12 +9,15 @@ rpc:
   # Maximum retry attempts
   max_retries: 3
   # Batch size for RPC polling (records per batch before flushing to storage)
-  batch_size: 200000
+  batch_size: 10000
   # Maximum seconds to wait before flushing a batch to storage
   batch_timeout: 30
+  # Maximum pending records (buffered + flushing) before pausing polling
+  # Prevents memory overflow when flush is slower than poll speed
+  max_pending_records: 20000
   # gRPC configuration (default enabled for PixelsPollingService)
   use_grpc: true
-  grpc_host: localhost
+  grpc_host: realtime-pixels-coordinator
   grpc_port: 9091
 
 lancedb:
