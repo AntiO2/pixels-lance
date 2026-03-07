@@ -19,6 +19,7 @@ fi
 # create virtual environment if not present
 if [ ! -d "$VENV_DIR" ]; then
     echo "[*] Creating virtual environment at $VENV_DIR"
+    sudo apt install python3.10-venv
     "$PYTHON" -m venv "$VENV_DIR"
 fi
 
@@ -41,6 +42,16 @@ if python -c 'import grpc_tools.protoc' 2>/dev/null; then
         --pyi_out="$REPO_ROOT/src/pixels_lance/proto" \
         --grpc_python_out="$REPO_ROOT/src/pixels_lance/proto" \
         "$REPO_ROOT/proto/sink.proto"
+
+    # ensure proto package marker exists
+    touch "$REPO_ROOT/src/pixels_lance/proto/__init__.py"
+
+    # fix grpc generated import style for package context
+    PROTO_GRPC_FILE="$REPO_ROOT/src/pixels_lance/proto/sink_pb2_grpc.py"
+    if [ -f "$PROTO_GRPC_FILE" ] && grep -q '^import sink_pb2 as sink__pb2' "$PROTO_GRPC_FILE"; then
+        echo "[*] Patching sink_pb2_grpc.py import to package-relative form"
+        sed -i 's/^import sink_pb2 as sink__pb2$/from . import sink_pb2 as sink__pb2/' "$PROTO_GRPC_FILE"
+    fi
 else
     echo "[!] grpc_tools.protoc not available, skipping proto compilation" >&2
 fi
