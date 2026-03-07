@@ -15,8 +15,10 @@ import yaml
 
 try:
     from .logger import get_logger
+    from .proto import sink_pb2
 except ImportError:
     from logger import get_logger
+    from proto import sink_pb2
 
 logger = get_logger(__name__)
 
@@ -78,6 +80,7 @@ class SchemaField:
         scale: Optional[int] = None,
         charset: str = "utf-8",
         nullable: bool = True,
+        timezone: Optional[str] = None,
     ):
         """
         Initialize schema field
@@ -87,10 +90,11 @@ class SchemaField:
             type_: Data type (int32, float32, varchar, timestamp, etc.)
             size: Size in bytes (for fixed-size types and strings)
             offset: Offset in binary data (optional, auto-calculated if not provided)
-            precision: For decimal types
+                precision: For decimal and timestamp types (timestamp: 0=s, 3=ms, 6=us, 9=ns)
             scale: For decimal types
             charset: Character encoding for string types
             nullable: Whether field can be null
+                timezone: For timestamp types (IANA timezone or '-' for no timezone)
         """
         self.name = name
         self.type = type_
@@ -100,6 +104,7 @@ class SchemaField:
         self.scale = scale
         self.charset = charset
         self.nullable = nullable
+        self.timezone = timezone
 
     def get_size(self) -> int:
         """Get size of this field in bytes"""
@@ -164,6 +169,7 @@ class Schema:
                 scale=f.get("scale"),
                 charset=f.get("charset", "utf-8"),
                 nullable=f.get("nullable", True),
+                timezone=f.get("timezone"),
             )
             for f in data.get("fields", [])
         ]
@@ -229,7 +235,7 @@ class Schema:
                 pk_positions[pk_field.lower()] = i
         
         for field in self.fields:
-            pa_type = self._get_pyarrow_type(field.type)
+            pa_type = self._get_pyarrow_type_for_field(field)
             
             # Build field metadata for Lance primary key support
             metadata = {}
@@ -255,12 +261,14 @@ class Schema:
         
         return pa.schema(pa_fields)
     
-    def _get_pyarrow_type(self, field_type: str) -> "pa.DataType":
-        """Map schema field type to PyArrow type"""
+    def _get_pyarrow_type_for_field(self, field: SchemaField) -> "pa.DataType":
+        """Map schema field to PyArrow type with full metadata support (precision, timezone, etc.)"""
         try:
             import pyarrow as pa
         except ImportError:
-            raise ImportError("PyArrow is required for _get_pyarrow_type()")
+            raise ImportError("PyArrow is required for _get_pyarrow_type_for_field()")
+        
+        field_type = field.type
         
         # Map schema types to PyArrow types
         type_map = {
@@ -282,11 +290,35 @@ class Schema:
             "varbinary": pa.binary(),
             "date": pa.date32(),
             "time": pa.time64("us"),  # microseconds (only unit time64 supports)
-            "timestamp": pa.timestamp("ms"),
-            "timestamp_with_tz": pa.timestamp("ms", tz="UTC"),
             "boolean": pa.bool_(),
             "decimal": pa.decimal128(38, 10),  # Default precision/scale
         }
+        
+        # Handle timestamp types with configurable precision and timezone.
+        # NOTE:
+        # - `timestamp` and `timestamp_with_tz` both support timezone metadata.
+        # - If timezone is not provided, default to UTC.
+        # - Use timezone '-' to explicitly request timezone-naive timestamp.
+        if field_type.lower() in ("timestamp", "timestamp_with_tz"):
+            # Map precision to PyArrow unit (3=ms, 6=us, 9=ns, default=ms)
+            precision_to_unit = {
+                0: "s",   # seconds
+                3: "ms",  # milliseconds
+                6: "us",  # microseconds
+                9: "ns",  # nanoseconds
+            }
+            unit = precision_to_unit.get(field.precision, "ms")
+            
+            # Determine timezone
+            if field.timezone == "-":
+                tz = None
+            elif field.timezone:
+                tz = field.timezone
+            else:
+                # Default to UTC when timezone is omitted
+                tz = "UTC"
+            
+            return pa.timestamp(unit, tz=tz)
         
         pa_type = type_map.get(field_type.lower())
         if pa_type is None:
@@ -380,17 +412,28 @@ class DataParser:
             Dictionary with field names as keys and parsed values (uses 'after' for UPDATE)
         """
         result = {}
-        op_type = op_type.upper()
         num_fields = len(self.schema.fields)
 
+        # Normalize op_type: support both string and protobuf enum integer values
+        if isinstance(op_type, str):
+            op_type = op_type.upper()
+            # Map string to protobuf enum value for consistent handling
+            op_map = {
+                "INSERT": sink_pb2.INSERT,
+                "UPDATE": sink_pb2.UPDATE,
+                "DELETE": sink_pb2.DELETE,
+                "SNAPSHOT": sink_pb2.SNAPSHOT,
+            }
+            op_type = op_map.get(op_type, sink_pb2.INSERT)
+        
         # Calculate expected column count based on operation type
-        if op_type in ("INSERT", "SNAPSHOT"):
+        if op_type in (sink_pb2.INSERT, sink_pb2.SNAPSHOT):
             expected_cols = num_fields
             start_idx = 0  # Start from first column
-        elif op_type == "UPDATE":
+        elif op_type == sink_pb2.UPDATE:
             expected_cols = 2 * num_fields  # before + after
             start_idx = num_fields  # Start from 'after' section (skip 'before')
-        elif op_type == "DELETE":
+        elif op_type == sink_pb2.DELETE:
             expected_cols = num_fields  # Only 'before' columns
             start_idx = 0
         else:
@@ -401,19 +444,20 @@ class DataParser:
         # Validate column count
         if len(column_values) != expected_cols:
             field_names = [f.name for f in self.schema.fields]
+            column_sizes = [len(c) if c else 0 for c in column_values]
+            op_name = sink_pb2.OperationType.Name(op_type) if isinstance(op_type, int) else op_type
             logger.error(
-                "Column count mismatch for operation",
-                extra={
-                    "operation": op_type,
-                    "expected": expected_cols,
-                    "expected_fields": field_names,
-                    "received": len(column_values),
-                    "column_sizes": [len(c) if c else 0 for c in column_values],
-                },
+                f"Column count mismatch for operation {op_name}: "
+                f"expected {expected_cols} (num_fields={num_fields}, 2x for UPDATE), "
+                f"received {len(column_values)}, "
+                f"start_idx={start_idx}, "
+                f"expected_fields={field_names}, "
+                f"column_sizes={column_sizes}"
             )
             # Try to handle gracefully - if we have too many columns, skip extras
             if len(column_values) > expected_cols:
                 column_values = column_values[:expected_cols]
+            # If we have too few columns, we'll fill in missing values below
             
         # Parse fields from the appropriate section
         for i, field in enumerate(self.schema.fields):
@@ -425,11 +469,12 @@ class DataParser:
                 else:
                     result[field.name] = None if field.nullable else field.name + "_MISSING"
             except Exception as e:
+                op_name = sink_pb2.OperationType.Name(op_type) if isinstance(op_type, int) else op_type
                 logger.error(
                     "Failed to parse field",
                     extra={
                         "field": field.name,
-                        "operation": op_type,
+                        "operation": op_name,
                         "type": field.type,
                         "column_index": start_idx + i,
                         "data_len": len(column_values[start_idx + i]) if (start_idx + i) < len(column_values) else 0,

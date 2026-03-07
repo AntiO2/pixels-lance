@@ -69,7 +69,7 @@ python tests/test_query_customer.py
 
 ```bash
 # 基础用法:拉取并存储(必须指定 bucket-id)
-pixels-lance --schema tpch --table customer --bucket-id 0
+pixels-lance --schema pixels_bench --table neworder --bucket-id 0
 
 # 指定多个 bucket IDs
 pixels-lance --schema tpch --table customer --bucket-id 0 --bucket-id 1 --bucket-id 2

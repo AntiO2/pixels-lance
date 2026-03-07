@@ -11,9 +11,11 @@ import requests
 try:
     from .config import ConfigManager, RpcConfig
     from .logger import get_logger
+    from .proto import sink_pb2
 except ImportError:
     from config import ConfigManager, RpcConfig
     from logger import get_logger
+    from proto import sink_pb2
 
 logger = get_logger(__name__)
 
@@ -142,15 +144,48 @@ class RowRecordBinaryExtractor:
 
         Returns:
             Tuple of (operation_type, column_values_list), or None if no data
-            column_values_list is a list of bytes, one per column
+            For UPDATE: column_values = before_cols + after_cols (2N columns)
+            For INSERT/SNAPSHOT: column_values = after_cols (N columns)
+            For DELETE: column_values = before_cols (N columns)
         """
-        # Extract 'after' value if available (new/updated data), else 'before'
-        row_value = row_record.after if row_record.after and row_record.after.values else row_record.before
-        if not row_value or not row_value.values:
+        column_values = []
+        
+        # For UPDATE operations, we need both before and after values
+        if row_record.op == sink_pb2.UPDATE:
+            # Extract before columns
+            if row_record.before and row_record.before.values:
+                column_values.extend([col_value.value for col_value in row_record.before.values])
+            else:
+                logger.warning("UPDATE record missing 'before' values")
+                return None
+            
+            # Extract after columns
+            if row_record.after and row_record.after.values:
+                column_values.extend([col_value.value for col_value in row_record.after.values])
+            else:
+                logger.warning("UPDATE record missing 'after' values")
+                return None
+        
+        # For INSERT/SNAPSHOT, use after values
+        elif row_record.op in (sink_pb2.INSERT, sink_pb2.SNAPSHOT):
+            if row_record.after and row_record.after.values:
+                column_values = [col_value.value for col_value in row_record.after.values]
+            else:
+                op_name = sink_pb2.OperationType.Name(row_record.op)
+                logger.warning(f"{op_name} record missing 'after' values")
+                return None
+        
+        # For DELETE, use before values
+        elif row_record.op == sink_pb2.DELETE:
+            if row_record.before and row_record.before.values:
+                column_values = [col_value.value for col_value in row_record.before.values]
+            else:
+                logger.warning("DELETE record missing 'before' values")
+                return None
+        
+        else:
+            logger.warning(f"Unknown operation type: {row_record.op}")
             return None
-
-        # Extract each column value as separate bytes
-        column_values = [col_value.value for col_value in row_value.values]
 
         return (row_record.op, column_values) if column_values else None
 

@@ -18,6 +18,9 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+        # Include extra fields if present
+        if hasattr(record, 'extra'):
+            log_data.update(record.extra)
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
         return json.dumps(log_data)

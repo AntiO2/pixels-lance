@@ -5,8 +5,11 @@ Command-line interface for Pixels Lance
 import argparse
 import sys
 import time
+import threading
+import queue
 from pathlib import Path
 from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor
 
 # Handle imports - use absolute imports for direct execution
 sys.path.insert(0, str(Path(__file__).parent))
@@ -21,12 +24,13 @@ import proto.sink_pb2 as sink_pb2
 logger = get_logger(__name__)
 
 
-def _flush_batch(insert_update_batch, delete_batch, parser, store, table_name, output_mode, logger):
+def _flush_batch(insert_snapshot_batch, update_batch, delete_batch, parser, store, table_name, output_mode, logger):
     """
-    Flush accumulated batch records to storage.
+    Flush accumulated batch records to storage in parallel.
     
     Args:
-        insert_update_batch: List of INSERT/UPDATE/SNAPSHOT binary column values
+        insert_snapshot_batch: List of INSERT/SNAPSHOT binary column values
+        update_batch: List of UPDATE binary column values
         delete_batch: List of DELETE binary column values
         parser: DataParser instance
         store: LanceDBStore instance
@@ -34,17 +38,44 @@ def _flush_batch(insert_update_batch, delete_batch, parser, store, table_name, o
         output_mode: "store" or "print"
         logger: Logger instance
     """
-    # Process INSERT/UPDATE/SNAPSHOT records
-    if insert_update_batch:
-        print(f"Flushing {len(insert_update_batch)} INSERT/UPDATE/SNAPSHOT records")
+    def process_insert_snapshot():
+        if not insert_snapshot_batch:
+            return
+        print(f"Flushing {len(insert_snapshot_batch)} INSERT/SNAPSHOT records")
         
         try:
             # Parse binary data
-            parsed_records = parser.parse_batch(insert_update_batch, op_type="INSERT")
+            parsed_records = parser.parse_batch(insert_snapshot_batch, op_type="INSERT")
             print(f"Parsed {len(parsed_records)} records")
 
             if output_mode == "store":
-                # Store in LanceDB with upsert
+                # Store in LanceDB with append add
+                print(f"Adding {len(parsed_records)} records to LanceDB table '{table_name}'...")
+                store.add(
+                    records=parsed_records,
+                    table_name=table_name,
+                    schema=parser.schema.to_pyarrow_schema(),
+                )
+                print(f"Successfully added {len(parsed_records)} records")
+            else:  # output_mode == "print"
+                print(f"Print mode: Displaying {len(parsed_records)} records")
+                for i, record in enumerate(parsed_records):
+                    field_values = [f"{key}={repr(value)}" for key, value in record.items()]
+                    print(f"Record {i+1}: {', '.join(field_values)}")
+        except Exception as e:
+            print(f"Error processing INSERT/SNAPSHOT batch: {e}")
+            logger.exception(f"Failed to process batch of {len(insert_snapshot_batch)} records")
+
+    def process_update():
+        if not update_batch:
+            return
+        print(f"Flushing {len(update_batch)} UPDATE records")
+
+        try:
+            parsed_records = parser.parse_batch(update_batch, op_type="UPDATE")
+            print(f"Parsed {len(parsed_records)} update records")
+
+            if output_mode == "store":
                 print(f"Upserting {len(parsed_records)} records to LanceDB table '{table_name}'...")
                 store.upsert(
                     records=parsed_records,
@@ -52,18 +83,19 @@ def _flush_batch(insert_update_batch, delete_batch, parser, store, table_name, o
                     pk=parser.schema.pk,
                     schema=parser.schema.to_pyarrow_schema(),
                 )
-                print(f"Successfully stored {len(parsed_records)} records")
+                print(f"Successfully upserted {len(parsed_records)} records")
             else:  # output_mode == "print"
-                print(f"Print mode: Displaying {len(parsed_records)} records")
+                print(f"Print mode: Displaying {len(parsed_records)} update records")
                 for i, record in enumerate(parsed_records):
                     field_values = [f"{key}={repr(value)}" for key, value in record.items()]
-                    print(f"Record {i+1}: {', '.join(field_values)}")
+                    print(f"Update Record {i+1}: {', '.join(field_values)}")
         except Exception as e:
-            print(f"Error processing INSERT/UPDATE/SNAPSHOT batch: {e}")
-            logger.exception(f"Failed to process batch of {len(insert_update_batch)} records")
+            print(f"Error processing UPDATE batch: {e}")
+            logger.exception(f"Failed to process update batch of {len(update_batch)} records")
 
-    # Process DELETE records
-    if delete_batch:
+    def process_delete():
+        if not delete_batch:
+            return
         print(f"Flushing {len(delete_batch)} DELETE records")
         
         try:
@@ -88,6 +120,17 @@ def _flush_batch(insert_update_batch, delete_batch, parser, store, table_name, o
         except Exception as e:
             print(f"Error processing DELETE batch: {e}")
             logger.exception(f"Failed to process delete batch of {len(delete_batch)} records")
+    
+    # Process all operation types in parallel
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = []
+        futures.append(executor.submit(process_insert_snapshot))
+        futures.append(executor.submit(process_update))
+        futures.append(executor.submit(process_delete))
+        
+        # Wait for all operations to complete
+        for future in futures:
+            future.result()
 
 
 def main() -> int:
@@ -214,7 +257,8 @@ def main() -> int:
         batch_timeout = config.rpc.batch_timeout
         
         # Batch buffers for streaming processing
-        insert_update_batch = []
+        insert_snapshot_batch = []
+        update_batch = []
         delete_batch = []
         last_flush_time = time.time()
 
@@ -229,15 +273,16 @@ def main() -> int:
                 if not row_records:
                     print("No records received, checking if batch should be flushed...")
                     # Check if batch should be flushed due to timeout
-                    if insert_update_batch or delete_batch:
+                    if insert_snapshot_batch or update_batch or delete_batch:
                         elapsed = time.time() - last_flush_time
                         if elapsed > batch_timeout:
                             print(f"Batch timeout ({batch_timeout}s) reached, flushing batch...")
                             _flush_batch(
-                                insert_update_batch, delete_batch, 
+                                insert_snapshot_batch, update_batch, delete_batch,
                                 parser, store, args.table, output_mode, logger
                             )
-                            insert_update_batch.clear()
+                            insert_snapshot_batch.clear()
+                            update_batch.clear()
                             delete_batch.clear()
                             last_flush_time = time.time()
                     
@@ -257,20 +302,23 @@ def main() -> int:
 
                 # Group records by operation type and add to batch buffers
                 for op_type, column_values in extracted_data:
-                    if op_type in (sink_pb2.OperationType.INSERT, sink_pb2.OperationType.UPDATE, sink_pb2.OperationType.SNAPSHOT):
-                        insert_update_batch.append(column_values)
+                    if op_type in (sink_pb2.OperationType.INSERT, sink_pb2.OperationType.SNAPSHOT):
+                        insert_snapshot_batch.append(column_values)
+                    elif op_type == sink_pb2.OperationType.UPDATE:
+                        update_batch.append(column_values)
                     elif op_type == sink_pb2.OperationType.DELETE:
                         delete_batch.append(column_values)
 
                 # Check if batch size reached
-                total_batch_size = len(insert_update_batch) + len(delete_batch)
+                total_batch_size = len(insert_snapshot_batch) + len(update_batch) + len(delete_batch)
                 if total_batch_size >= batch_size:
                     print(f"Batch size ({batch_size}) reached ({total_batch_size} records), flushing...")
                     _flush_batch(
-                        insert_update_batch, delete_batch, 
+                        insert_snapshot_batch, update_batch, delete_batch,
                         parser, store, args.table, output_mode, logger
                     )
-                    insert_update_batch.clear()
+                    insert_snapshot_batch.clear()
+                    update_batch.clear()
                     delete_batch.clear()
                     last_flush_time = time.time()
                 

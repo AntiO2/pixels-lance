@@ -396,6 +396,9 @@ class DataImporter:
         schema_dict = _schema_to_dict(schema)
         file_groups = self._split_files_for_workers(files_to_import, max_workers)
         worker_count = len(file_groups)
+        
+        # Always convert table name to lowercase for Lance dataset storage
+        dataset_name = table_name.lower()
 
         logger.info(
             f"Starting {worker_count} worker processes (batch_limit={self.batch_limit:,})..."
@@ -404,6 +407,9 @@ class DataImporter:
         manager = multiprocessing.Manager()
         write_lock = manager.Lock()
         total_written = 0
+
+        # Convert table name to lowercase for dataset name
+        dataset_name = table_name.lower()
 
         with ProcessPoolExecutor(
             max_workers=worker_count,
@@ -415,7 +421,7 @@ class DataImporter:
                     group,
                     schema_dict,
                     "|",
-                    table_name,
+                    dataset_name,
                     self.lancedb_config_dict,
                     self.batch_limit,
                     write_lock,
@@ -438,7 +444,7 @@ class DataImporter:
             logger.warning(f"No records found for table '{table_name}'")
             return 0
 
-        logger.info(f"✓ Imported {total_written} records for '{table_name}'")
+        logger.info(f"✓ Imported {total_written} records for '{dataset_name}'")
         return total_written
     
     def _import_csv_format(self, table_name: str, max_workers: int = 4) -> int:
@@ -497,6 +503,9 @@ class DataImporter:
         write_lock = manager.Lock()
         total_written = 0
 
+        # Convert table name to lowercase for dataset name
+        dataset_name = table_name.lower()
+
         with ProcessPoolExecutor(
             max_workers=worker_count,
             mp_context=multiprocessing.get_context("spawn"),
@@ -507,7 +516,7 @@ class DataImporter:
                     group,
                     schema_dict,
                     ",",
-                    table_name,
+                    dataset_name,
                     self.lancedb_config_dict,
                     self.batch_limit,
                     write_lock,
@@ -530,7 +539,7 @@ class DataImporter:
             logger.warning(f"No records found for table '{table_name}'")
             return 0
 
-        logger.info(f"✓ Imported {total_written} records for '{table_name}'")
+        logger.info(f"✓ Imported {total_written} records for '{dataset_name}'")
         return total_written
     
     def import_table(self, table_name: str, max_workers: int = 4) -> int:

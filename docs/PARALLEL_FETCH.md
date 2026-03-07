@@ -194,7 +194,7 @@ grep -r "Failed\|Error\|超时" /tmp/fetch_*.log | wc -l
 ### 命令语法
 
 ```bash
-python3 scripts/fetch_all_tables.py [--schema-type TYPE] [--output-mode MODE] [--bucket-num N] [--workers W] [--tables T1 T2 ...]
+python3 scripts/fetch_all_tables.py [--schema-type TYPE] [--output-mode MODE] [--bucket-num N] [--tables T1 T2 ...] [--execution-mode thread|process] [--timeout SECONDS]
 ```
 
 ### 参数说明
@@ -203,23 +203,30 @@ python3 scripts/fetch_all_tables.py [--schema-type TYPE] [--output-mode MODE] [-
 |------|------|--------|------|
 | **--schema-type** | 可选 | `hybench` | Benchmark 类型：`hybench`, `chbenchmark`, `tpch` |
 | **--output-mode** | 可选 | `store` | 输出方式：`store`（存储）, `print`（打印） |
-| **--bucket-num** | 可选 | `4` | 分片数（并行度） |
-| **--workers** | 可选 | `8` | 并行工作线程数（表级别） |
+| **--bucket-num** | 可选 | `4` | 每张表的分片数；每个 `(table, bucket)` 任务都会并行执行 |
 | **--tables** | 可选 | 全部 | 仅导入指定表（用空格分隔） |
+| **--execution-mode** | 可选 | `process` | 并行模式：`process`（多进程）或 `thread`（多线程） |
+| **--timeout** | 可选 | `300` | 每个任务的超时时间（秒） |
 
 ### 常见用例
 
 #### 1. Hybench 导入（推荐用法）
 
 ```bash
-# 默认配置（8 个表，4 个分片，8 个工作线程）
+# 默认配置（自动并行所有 `(table, bucket)` 任务）
 python3 scripts/fetch_all_tables.py
 
-# 增加工作线程（加快速度）
-python3 scripts/fetch_all_tables.py --workers 16
+# 显式使用多进程（默认即为 process）
+python3 scripts/fetch_all_tables.py --execution-mode process
 
-# 增加分片数（极限并行）
-python3 scripts/fetch_all_tables.py --bucket-num 8 --workers 16
+# 切换为多线程
+python3 scripts/fetch_all_tables.py --execution-mode thread
+
+# 增加分片数（任务数 = 表数 × bucket_num）
+python3 scripts/fetch_all_tables.py --bucket-num 8
+
+# 自定义超时时间（600秒 = 10分钟）
+python3 scripts/fetch_all_tables.py --timeout 600
 
 # 仅导入特定表
 python3 scripts/fetch_all_tables.py --tables customer company transfer
@@ -235,7 +242,7 @@ python3 scripts/fetch_all_tables.py --schema-type chbenchmark
 python3 scripts/fetch_all_tables.py --schema-type tpch
 
 # 快速并行
-python3 scripts/fetch_all_tables.py --schema-type chbenchmark --workers 16 --bucket-num 8
+python3 scripts/fetch_all_tables.py --schema-type chbenchmark --bucket-num 4 --timeout 2000
 ```
 
 #### 3. 调试模式（打印数据）
@@ -248,7 +255,7 @@ python3 scripts/fetch_all_tables.py --output-mode print
 python3 scripts/fetch_all_tables.py --output-mode print --tables customer
 
 # 快速验证格式
-python3 scripts/fetch_all_tables.py --output-mode print --bucket-num 1 --workers 2
+python3 scripts/fetch_all_tables.py --output-mode print --bucket-num 1
 ```
 
 ### Python vs Bash 脚本对比
@@ -256,8 +263,8 @@ python3 scripts/fetch_all_tables.py --output-mode print --bucket-num 1 --workers
 | 特性 | Bash | Python |
 |------|------|--------|
 | 参数风格 | 位置参数 | 命名参数（更易懂） |
-| 并行方式 | 纯 Bash 后台任务 | ThreadPoolExecutor（更高效） |
-| 表级并行 | 有限 | ✓ 多个表真正并行 |
+| 并行方式 | 纯 Bash 后台任务 | ProcessPoolExecutor / ThreadPoolExecutor |
+| 并行粒度 | 表 + bucket 全并行 | 表 + bucket 全并行 |
 | 错误处理 | 基础 | ✓ 更详细 |
 | 易用性 | 简单 | ✓ 推荐 |
 
@@ -265,16 +272,16 @@ python3 scripts/fetch_all_tables.py --output-mode print --bucket-num 1 --workers
 
 ```bash
 # 小集群（<4 核）
-python3 scripts/fetch_all_tables.py --workers 4 --bucket-num 2
+python3 scripts/fetch_all_tables.py --bucket-num 2
 
 # 中型集群（4-8 核）
-python3 scripts/fetch_all_tables.py --workers 8 --bucket-num 4
+python3 scripts/fetch_all_tables.py --bucket-num 4
 
 # 大型集群（>8 核）
-python3 scripts/fetch_all_tables.py --workers 16 --bucket-num 8
+python3 scripts/fetch_all_tables.py --bucket-num 8
 
 # 网络好的极限并行
-python3 scripts/fetch_all_tables.py --workers 32 --bucket-num 16
+python3 scripts/fetch_all_tables.py --bucket-num 16
 ```
 
 ---

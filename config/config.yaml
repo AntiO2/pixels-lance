@@ -9,9 +9,9 @@ rpc:
   # Maximum retry attempts
   max_retries: 3
   # Batch size for RPC polling (records per batch before flushing to storage)
-  batch_size: 1000
+  batch_size: 200000
   # Maximum seconds to wait before flushing a batch to storage
-  batch_timeout: 5
+  batch_timeout: 30
   # gRPC configuration (default enabled for PixelsPollingService)
   use_grpc: true
   grpc_host: localhost
@@ -70,3 +70,12 @@ parser:
 
 # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 log_level: INFO
+
+# Resource monitoring configuration
+monitor:
+  # Enable resource monitoring
+  enabled: true
+  # Path to write monitoring data (CSV format)
+  output_path: ./logs/resource_stats.csv
+  # Sampling interval in seconds
+  interval: 2.0

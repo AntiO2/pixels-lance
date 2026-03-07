@@ -16,6 +16,42 @@ OUTPUT_MODE="${2:-store}"
 BUCKET_NUM="${3:-4}"
 TIMEOUT="${4:-300}" # 默认超时时间 300 秒（5分钟）
 
+# 资源监控文件
+RESOURCE_LOG="logs/fetch_resource_monitor.log"
+MONITOR_PID=""
+
+# 函数：监控 CPU 和内存使用
+monitor_resources() {
+    local script_name="pixels_lance/cli.py"
+    
+    > "$RESOURCE_LOG"  # 清空日志
+    
+    while true; do
+        # 获取所有相关进程的 CPU 和内存
+        local total_cpu=0
+        local total_mem=0
+        local process_count=0
+        
+        # 查找所有包含 cli.py 的 Python 进程
+        while IFS= read -r line; do
+            local cpu=$(echo "$line" | awk '{print $1}')
+            local mem=$(echo "$line" | awk '{print $2}')
+            
+            # 累加 CPU 和内存（去除 % 符号）
+            total_cpu=$(echo "$total_cpu + ${cpu%\%}" | bc -l)
+            total_mem=$(echo "$total_mem + ${mem%\%}" | bc -l)
+            ((process_count++))
+        done < <(ps aux | grep "$script_name" | grep -v grep | awk '{print $3, $4}')
+        
+        # 记录时间戳和资源使用
+        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        printf "%s | Processes: %d | CPU: %.2f%% | Memory: %.2f%%\n" \
+            "$timestamp" "$process_count" "$total_cpu" "$total_mem" >> "$RESOURCE_LOG"
+        
+        sleep 2  # 每2秒采样一次
+    done
+}
+
 # 根据 schema 类型设置表列表和 RPC schema 名称
 case "$SCHEMA_TYPE" in
     hybench)
@@ -69,6 +105,13 @@ echo "Total Tasks: $((${#TABLES[@]} * BUCKET_NUM))"
 echo "Timeout: ${TIMEOUT}s per task"
 echo "Repo Root: $REPO_ROOT"
 echo "======================================================"
+
+# 启动资源监控
+echo "启动资源监控..."
+monitor_resources &
+MONITOR_PID=$!
+echo "资源监控进程 PID: $MONITOR_PID"
+echo ""
 
 start_time=$(date +%s)
 
@@ -133,6 +176,14 @@ done
 # 等待所有后台任务完成
 wait
 
+# 停止资源监控
+if [ -n "$MONITOR_PID" ] && kill -0 "$MONITOR_PID" 2>/dev/null; then
+    echo ""
+    echo "停止资源监控..."
+    kill "$MONITOR_PID" 2>/dev/null || true
+    wait "$MONITOR_PID" 2>/dev/null || true
+fi
+
 # 检查结果
 for table in "${TABLES[@]}"; do
     for ((bucket_id = 0; bucket_id < BUCKET_NUM; bucket_id++)); do
@@ -151,6 +202,27 @@ end_time=$(date +%s)
 elapsed=$((end_time - start_time))
 total_tasks=$((${#TABLES[@]} * BUCKET_NUM))
 
+# 计算资源使用统计
+if [ -f "$RESOURCE_LOG" ]; then
+    echo ""
+    echo "======================================================"
+    echo "资源使用统计"
+    echo "======================================================"
+    
+    # 提取 CPU 和内存的最大值、平均值
+    local max_cpu=$(awk -F'[:|%]' '/CPU:/ {gsub(/ /, "", $3); if ($3+0 > max) max=$3+0} END {printf "%.2f", max}' "$RESOURCE_LOG")
+    local avg_cpu=$(awk -F'[:|%]' '/CPU:/ {gsub(/ /, "", $3); sum+=$3; count++} END {if(count>0) printf "%.2f", sum/count; else print "0.00"}' "$RESOURCE_LOG")
+    local max_mem=$(awk -F'[:|%]' '/Memory:/ {gsub(/ /, "", $4); if ($4+0 > max) max=$4+0} END {printf "%.2f", max}' "$RESOURCE_LOG")
+    local avg_mem=$(awk -F'[:|%]' '/Memory:/ {gsub(/ /, "", $4); sum+=$4; count++} END {if(count>0) printf "%.2f", sum/count; else print "0.00"}' "$RESOURCE_LOG")
+    local max_procs=$(awk -F'[:|]' '/Processes:/ {gsub(/ /, "", $2); if ($2+0 > max) max=$2+0} END {printf "%d", max}' "$RESOURCE_LOG")
+    
+    echo "最大并发进程数: $max_procs"
+    echo "CPU 使用率: 平均 ${avg_cpu}%, 峰值 ${max_cpu}%"
+    echo "内存使用率: 平均 ${avg_mem}%, 峰值 ${max_mem}%"
+    echo ""
+    echo "详细日志: $RESOURCE_LOG"
+fi
+
 echo ""
 echo "======================================================"
 echo "拉取结果汇总"
@@ -160,7 +232,9 @@ echo "成功: ${successful}/${total_tasks}"
 echo "失败: ${failed}/${total_tasks}"
 echo "======================================================"
 
-# 清理临时文件
+# 清理临时文件（保留资源日志）
 rm -f /tmp/fetch_*.log
+# 如需保留资源日志，注释掉下面这行
+# rm -f "$RESOURCE_LOG"
 
 exit $failed

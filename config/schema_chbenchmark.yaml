@@ -81,7 +81,7 @@ tables:
         type: timestamp
         size: 8
         offset: 93
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -179,7 +179,7 @@ tables:
         type: timestamp
         size: 8
         offset: 101
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -360,7 +360,7 @@ tables:
         type: timestamp
         size: 8
         offset: 667
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -414,7 +414,7 @@ tables:
         type: timestamp
         size: 8
         offset: 20
-        precision: 3
+        precision: 6
         nullable: false
         description: "Transaction date"
 
@@ -437,7 +437,7 @@ tables:
         type: timestamp
         size: 8
         offset: 532
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -474,7 +474,7 @@ tables:
         type: timestamp
         size: 8
         offset: 12
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -546,7 +546,7 @@ tables:
         type: timestamp
         size: 8
         offset: 32
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -634,7 +634,7 @@ tables:
         type: timestamp
         size: 8
         offset: 68
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -684,7 +684,7 @@ tables:
         type: timestamp
         size: 8
         offset: 94
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -836,7 +836,7 @@ tables:
         type: timestamp
         size: 8
         offset: 398
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -879,7 +879,7 @@ tables:
         type: timestamp
         size: 8
         offset: 185
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -945,7 +945,7 @@ tables:
         type: timestamp
         size: 8
         offset: 193
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
 
@@ -981,6 +981,6 @@ tables:
         type: timestamp
         size: 8
         offset: 211
-        precision: 3
+        precision: 6
         nullable: true
         description: "Freshness timestamp"
