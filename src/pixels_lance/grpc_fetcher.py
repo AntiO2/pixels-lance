@@ -36,14 +36,7 @@ class PixelsGrpcFetcher:
         """Establish gRPC channel connection"""
         if self.channel is None:
             target = f"{self.host}:{self.port}"
-            # Use synchronous gRPC client
-            if self.host != "localhost":
-                self.channel = grpc.secure_channel(
-                    target,
-                    grpc.ssl_channel_credentials(),
-                )
-            else:
-                self.channel = grpc.insecure_channel(target)
+            self.channel = grpc.insecure_channel(target)
             self.stub = sink_pb2_grpc.PixelsPollingServiceStub(self.channel)
             logger.info("gRPC channel connected", extra={"target": target})
 
