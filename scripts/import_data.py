@@ -69,7 +69,29 @@ def _stream_parse_and_add_worker(
             logger.info(f"  ... and {len(file_paths) - 3} more files")
 
     schema = Schema.from_dict(schema_dict)
+    
+    # Log primary key information
+    if schema.pk:
+        logger.info(f"  Primary key fields: {', '.join(schema.pk)}")
+    else:
+        logger.info("  No primary key defined")
+    
     schema_arrow = schema.to_pyarrow_schema()
+    
+    # Verify primary key metadata was added to PyArrow schema
+    if schema.pk:
+        for field in schema_arrow:
+            if field.name in schema.pk:
+                if field.metadata:
+                    pk_meta = field.metadata.get(b"lance-schema:unenforced-primary-key")
+                    pos_meta = field.metadata.get(b"lance-schema:unenforced-primary-key:position")
+                    if pk_meta:
+                        pos_str = f", position={pos_meta.decode()}" if pos_meta else ""
+                        logger.info(f"  ✓ Primary key metadata added to field '{field.name}'{pos_str}")
+                    else:
+                        logger.warning(f"  ✗ Primary key metadata missing for field '{field.name}'")
+                else:
+                    logger.warning(f"  ✗ No metadata for field '{field.name}'")
 
     store = LanceDBStore(config=LanceDBConfig(**lancedb_config_dict))
 
@@ -190,6 +212,7 @@ def _schema_to_dict(schema: Schema) -> Dict[str, Any]:
     return {
         "table_name": schema.table_name,
         "pk": list(schema.pk) if schema.pk else [],
+        "primary_key": list(schema.pk) if schema.pk else [],  # Alias for compatibility
         "fields": [
             {
                 "name": f.name,
@@ -400,6 +423,12 @@ class DataImporter:
         # Always convert table name to lowercase for Lance dataset storage
         dataset_name = table_name.lower()
 
+        # Log primary key configuration
+        if schema.pk:
+            logger.info(f"Primary key configured: {', '.join(schema.pk)}")
+        else:
+            logger.info("No primary key configured for this table")
+
         logger.info(
             f"Starting {worker_count} worker processes (batch_limit={self.batch_limit:,})..."
         )
@@ -495,6 +524,15 @@ class DataImporter:
         file_groups = self._split_files_for_workers(files_to_import, max_workers)
         worker_count = len(file_groups)
 
+        # Convert table name to lowercase for dataset name
+        dataset_name = table_name.lower()
+
+        # Log primary key configuration
+        if schema.pk:
+            logger.info(f"Primary key configured: {', '.join(schema.pk)}")
+        else:
+            logger.info("No primary key configured for this table")
+
         logger.info(
             f"Starting {worker_count} worker processes (batch_limit={self.batch_limit:,})..."
         )
@@ -502,9 +540,6 @@ class DataImporter:
         manager = multiprocessing.Manager()
         write_lock = manager.Lock()
         total_written = 0
-
-        # Convert table name to lowercase for dataset name
-        dataset_name = table_name.lower()
 
         with ProcessPoolExecutor(
             max_workers=worker_count,

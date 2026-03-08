@@ -99,8 +99,8 @@ python3 scripts/import_data.py \
 # 导入所有表（使用 4 个并行工作线程）
 python3 scripts/import_data.py \
   --schema config/schema_hybench.yaml \
-  --data ~/disk2/Data_pixels_100x \
-  --workers 4
+  --data ~/disk4/Data_1000x_pixels \
+  --workers 16
 
 # 导入特定表（使用 8 个并行工作线程）
 python3 scripts/import_data.py \

@@ -60,9 +60,9 @@ class BackpressureController:
             return {'flushing': self.flushing_count}
 
 
-def _flush_batch(insert_snapshot_batch, update_batch, delete_batch, parser, store, table_name, output_mode, logger, backpressure=None):
+def _flush_batch(insert_snapshot_batch, update_batch, delete_batch, parser, store, table_name, output_mode, logger, config, backpressure=None):
     """
-    Flush accumulated batch records to storage in parallel.
+    Flush accumulated batch records to storage in parallel or sequential mode.
     
     Args:
         insert_snapshot_batch: List of INSERT/SNAPSHOT binary column values
@@ -73,6 +73,7 @@ def _flush_batch(insert_snapshot_batch, update_batch, delete_batch, parser, stor
         table_name: Target table name
         output_mode: "store" or "print"
         logger: Logger instance
+        config: Configuration object
         backpressure: BackpressureController instance
     """
     total_count = len(insert_snapshot_batch) + len(update_batch) + len(delete_batch)
@@ -128,6 +129,7 @@ def _flush_batch(insert_snapshot_batch, update_batch, delete_batch, parser, stor
                     print(f"Successfully upserted {len(parsed_records)} records")
                 else:  # output_mode == "print"
                     print(f"Print mode: Displaying {len(parsed_records)} update records")
+                    print(f"Pk {parser.schema.pk}")
                     for i, record in enumerate(parsed_records):
                         field_values = [f"{key}={repr(value)}" for key, value in record.items()]
                         print(f"Update Record {i+1}: {', '.join(field_values)}")
@@ -163,16 +165,26 @@ def _flush_batch(insert_snapshot_batch, update_batch, delete_batch, parser, stor
                 print(f"Error processing DELETE batch: {e}")
                 logger.exception(f"Failed to process delete batch of {len(delete_batch)} records")
         
-        # Process all operation types in parallel
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = []
-            futures.append(executor.submit(process_insert_snapshot))
-            futures.append(executor.submit(process_update))
-            futures.append(executor.submit(process_delete))
-            
-            # Wait for all operations to complete
-            for future in futures:
-                future.result()
+        # Process all operation types (sync mode or parallel mode)
+        sync_mode = config.rpc.get('sync', False) if hasattr(config.rpc, 'get') else getattr(config.rpc, 'sync', False)
+        
+        if sync_mode:
+            # Synchronous mode: one flush task at a time to reduce memory pressure
+            print("[SYNC MODE] Processing flushes sequentially...")
+            process_insert_snapshot()
+            process_update()
+            process_delete()
+        else:
+            # Parallel mode: process all operation types concurrently
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = []
+                futures.append(executor.submit(process_insert_snapshot))
+                futures.append(executor.submit(process_update))
+                futures.append(executor.submit(process_delete))
+                
+                # Wait for all operations to complete
+                for future in futures:
+                    future.result()
     finally:
         if backpressure:
             backpressure.finish_flush(total_count)
@@ -337,14 +349,14 @@ def main() -> int:
                             print(f"Batch timeout ({batch_timeout}s) reached, flushing batch...")
                             _flush_batch(
                                 insert_snapshot_batch, update_batch, delete_batch,
-                                parser, store, args.table, output_mode, logger, backpressure
+                                parser, store, args.table, output_mode, logger, config, backpressure
                             )
                             insert_snapshot_batch.clear()
                             update_batch.clear()
                             delete_batch.clear()
                             last_flush_time = time.time()
-                    
-                    time.sleep(1)  # Wait 1 second before next poll
+
+                            # Keep polling continuously when backpressure allows
                     continue
 
                 print(f"Received {len(row_records)} row records")
@@ -355,7 +367,7 @@ def main() -> int:
 
                 if not extracted_data:
                     print("No valid binary data extracted, waiting for next poll...")
-                    time.sleep(1)
+                    # Keep polling continuously when backpressure allows
                     continue
 
                 # Group records by operation type and add to batch buffers
@@ -373,16 +385,14 @@ def main() -> int:
                     print(f"Batch size ({batch_size}) reached ({total_batch_size} records), flushing...")
                     _flush_batch(
                         insert_snapshot_batch, update_batch, delete_batch,
-                        parser, store, args.table, output_mode, logger, backpressure
+                        parser, store, args.table, output_mode, logger, config, backpressure
                     )
                     insert_snapshot_batch.clear()
                     update_batch.clear()
                     delete_batch.clear()
                     last_flush_time = time.time()
                 
-
-                # Wait before next poll
-                time.sleep(1)
+                # Keep polling continuously when backpressure allows
         except KeyboardInterrupt:
             print("\nPolling stopped by user")
             return 0

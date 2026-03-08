@@ -1,7 +1,9 @@
-schemas:
+tables:
   # Customer table: 114 bytes total
-  - table_name: customer
-    pk: [custID]
+  customer:
+    table_name: customer
+    record_size: 114
+    primary_key: custID
     fields:
       - name: custID
         type: int32
@@ -72,8 +74,10 @@ schemas:
         precision: 6
 
   # Company table: 209 bytes total
-  - table_name: company
-    pk: [companyID]
+  company:
+    table_name: company
+    record_size: 209
+    primary_key: companyID
     fields:
       - name: companyID
         type: int32
@@ -140,8 +144,10 @@ schemas:
         precision: 6
 
   # Saving Account table: 32 bytes total
-  - table_name: savingaccount
-    pk: [accountID]
+  savingaccount:
+    table_name: savingaccount
+    record_size: 32
+    primary_key: accountID
     fields:
       - name: accountID
         type: int32
@@ -172,8 +178,10 @@ schemas:
         precision: 6
 
   # Checking Account table: 32 bytes total
-  - table_name: checkingaccount
-    pk: [accountID]
+  checkingaccount:
+    table_name: checkingaccount
+    record_size: 32
+    primary_key: accountID
     fields:
       - name: accountID
         type: int32
@@ -204,8 +212,10 @@ schemas:
         precision: 6
 
   # Transfer table: 46 bytes total
-  - table_name: transfer
-    pk: [id]
+  transfer:
+    table_name: transfer
+    record_size: 46
+    primary_key: id
     fields:
       - name: id
         type: int64
@@ -240,8 +250,10 @@ schemas:
         precision: 6
 
   # Checking table: 42 bytes total
-  - table_name: checking
-    pk: [id]
+  checking:
+    table_name: checking
+    record_size: 42
+    primary_key: id
     fields:
       - name: id
         type: int32
@@ -276,8 +288,10 @@ schemas:
         precision: 6
 
   # Loan Applications table: 44 bytes total
-  - table_name: loanapps
-    pk: [id]
+  loanapps:
+    table_name: loanapps
+    record_size: 44
+    primary_key: id
     fields:
       - name: id
         type: int32
@@ -312,8 +326,10 @@ schemas:
         precision: 6
 
   # Loan Transactions table: 60 bytes total
-  - table_name: loantrans
-    pk: [id]
+  loantrans:
+    table_name: loantrans
+    record_size: 60
+    primary_key: id
     fields:
       - name: id
         type: int32

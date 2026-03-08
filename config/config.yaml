@@ -9,15 +9,17 @@ rpc:
   # Maximum retry attempts
   max_retries: 3
   # Batch size for RPC polling (records per batch before flushing to storage)
-  batch_size: 10000
+  batch_size: 1000
   # Maximum seconds to wait before flushing a batch to storage
   batch_timeout: 30
   # Maximum pending records (buffered + flushing) before pausing polling
   # Prevents memory overflow when flush is slower than poll speed
-  max_pending_records: 20000
+  max_pending_records: 1000
+  # Synchronous flush mode: when enabled, processes one flush task at a time (reduces memory pressure)
+  sync: false
   # gRPC configuration (default enabled for PixelsPollingService)
   use_grpc: true
-  grpc_host: realtime-pixels-coordinator
+  grpc_host: ${SINK_SERVER_HOST}
   grpc_port: 9091
 
 lancedb:
@@ -65,7 +67,7 @@ lancedb:
 
 parser:
   # Path to schema definition file
-  schema_file: config/schema_chbenchmark.yaml
+  schema_file: config/schema_hybench.yaml
   # Data encoding
   encoding: utf-8
   # Whether table/field names are case-sensitive (false: convert to lowercase)

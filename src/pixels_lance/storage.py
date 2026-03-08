@@ -5,9 +5,15 @@ Lance storage module
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+import gc
 
 import lance
 import pyarrow as pa
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 try:
     from .config import ConfigManager, LanceDBConfig
@@ -102,6 +108,16 @@ class LanceDBStore:
         # Remove trailing slash from base_path to avoid double slashes
         base = self.base_path.rstrip('/')
         return f"{base}/{table_name}.lance"
+
+    @staticmethod
+    def _rss_mb() -> float:
+        """Return current process RSS in MB for debugging."""
+        if psutil is None:
+            return -1.0
+        try:
+            return psutil.Process().memory_info().rss / (1024 * 1024)
+        except Exception:
+            return -1.0
 
     def create_table(
         self,
@@ -238,6 +254,39 @@ class LanceDBStore:
         # De-duplicate source rows by primary key to avoid
         # "Ambiguous merge insert: multiple source rows match the same target row"
         pk_fields = [pk] if isinstance(pk, str) else list(pk)
+        logger.info(
+            "Upsert PK debug",
+            extra={
+                "table_name": table_name,
+                "pk_param": pk,
+                "pk_fields": pk_fields,
+                "records": len(records),
+                "dataset_path": dataset_path,
+            },
+        )
+
+        if table_name == "stock":
+            expected_stock_pk = ["s_w_id", "s_i_id"]
+            if pk_fields != expected_stock_pk:
+                logger.warning(
+                    "Stock upsert PK order mismatch",
+                    extra={
+                        "expected_pk_fields": expected_stock_pk,
+                        "actual_pk_fields": pk_fields,
+                    },
+                )
+            else:
+                sample_pk_values = []
+                for record in records[:3]:
+                    sample_pk_values.append({field: record.get(field) for field in pk_fields})
+                logger.info(
+                    "Stock upsert PK check passed",
+                    extra={
+                        "pk_fields": pk_fields,
+                        "sample_pk_values": sample_pk_values,
+                    },
+                )
+
         dedup_map: Dict[Any, Dict[str, Any]] = {}
 
         for record in records:
@@ -273,6 +322,8 @@ class LanceDBStore:
         except Exception:
             pass
 
+        rss_before_table = self._rss_mb()
+
         # Convert to pyarrow table with explicit schema if provided
         # Using explicit schema ensures nullable fields are properly typed from schema.yaml
         if schema is not None:
@@ -288,6 +339,11 @@ class LanceDBStore:
             else:
                 # No existing dataset and no schema provided, create table with inferred schema
                 pa_table = pa.Table.from_pylist(deduped_records)
+
+        rss_after_table = self._rss_mb()
+        logger.info(
+            f"Upsert memory debug: before_table={rss_before_table:.2f}MB, after_table={rss_after_table:.2f}MB, delta={rss_after_table-rss_before_table:.2f}MB"
+        )
 
         if not dataset_exists:
             # Dataset doesn't exist, create it with initial data
@@ -314,39 +370,57 @@ class LanceDBStore:
 
         # Dataset exists, perform merge_insert with retry
         max_retries = 3
-        for attempt in range(1, max_retries + 1):
-            try:
-                if self.storage_options:
-                    dataset = lance.dataset(dataset_path, storage_options=self.storage_options)
-                else:
-                    dataset = lance.dataset(dataset_path)
+        try:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    rss_before_merge = self._rss_mb()
 
-                # Build merge_insert operation
-                op = dataset.merge_insert(pk)
-                op = op.when_matched_update_all()
-                op = op.when_not_matched_insert_all()
-                op.execute(pa_table)
+                    if self.storage_options:
+                        dataset = lance.dataset(dataset_path, storage_options=self.storage_options)
+                    else:
+                        dataset = lance.dataset(dataset_path)
 
-                logger.info(
-                    "Upsert completed",
-                    extra={"table_name": table_name, "records": len(deduped_records), "attempt": attempt},
-                )
-                return
-            except Exception as e:
-                if attempt < max_retries and self._is_retryable_write_error(e):
-                    sleep_seconds = 0.2 * attempt
-                    logger.warning(
-                        "Upsert failed with retryable error, retrying",
-                        extra={
-                            "table_name": table_name,
-                            "attempt": attempt,
-                            "sleep_seconds": sleep_seconds,
-                            "error": str(e),
-                        },
+                    # Build merge_insert operation
+                    op = dataset.merge_insert(pk)
+                    op = op.when_matched_update_all()
+                    op = op.when_not_matched_insert_all()
+                    op.execute(pa_table)
+
+                    rss_after_merge = self._rss_mb()
+                    logger.info(
+                        f"Upsert completed (attempt={attempt}, records={len(deduped_records)}), memory: before_merge={rss_before_merge:.2f}MB, after_merge={rss_after_merge:.2f}MB, delta={rss_after_merge-rss_before_merge:.2f}MB"
                     )
-                    time.sleep(sleep_seconds)
-                    continue
-                raise
+                    return
+                except Exception as e:
+                    if attempt < max_retries and self._is_retryable_write_error(e):
+                        sleep_seconds = 0.2 * attempt
+                        logger.warning(
+                            "Upsert failed with retryable error, retrying",
+                            extra={
+                                "table_name": table_name,
+                                "attempt": attempt,
+                                "sleep_seconds": sleep_seconds,
+                                "error": str(e),
+                            },
+                        )
+                        time.sleep(sleep_seconds)
+                        continue
+                    raise
+        finally:
+            # Best-effort memory release between batches to reduce OOM risk.
+            try:
+                del pa_table
+            except Exception:
+                pass
+
+            gc.collect()
+
+            try:
+                pool = pa.default_memory_pool()
+                if hasattr(pool, "release_unused"):
+                    pool.release_unused()
+            except Exception:
+                pass
 
     def add(
         self,
